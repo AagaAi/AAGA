@@ -1,0 +1,15 @@
+{
+  "capital": 10000,
+  "default_pair": "XAUUSD",
+  "pairs": ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD", "AAPL"],
+  "gemini_api_key": "YOUR_GEMINI_API_KEY",
+  "parameters": {
+    "max_risk_pct": 0.01,
+    "daily_loss_limit_pct": 0.05,
+    "trailing_sl_activation_pct": 0.5,
+    "trailing_sl_distance_pct": 0.002,
+    "agent_weights": {"tech":0.4,"news":0.2,"risk":0.2,"strategy":0.2},
+    "strategy_selection_mode": "auto"
+  },
+  "strategy_pool": []
+}
