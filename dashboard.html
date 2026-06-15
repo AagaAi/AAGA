@@ -1,0 +1,30 @@
+<html><head><title>Tradevil AGI</title>
+<meta http-equiv="refresh" content="10"/>
+<style>body{background:#111;color:#eee;font-family:sans-serif;padding:20px}
+select,button{padding:10px;margin:5px}
+.card{background:#1e1e2f;padding:15px;margin:10px;border-radius:10px}
+</style></head><body>
+<h1>🤖 Tradevil AGI Dashboard</h1>
+<div>
+<select id="pairSelect">
+<option>XAUUSD</option><option>EURUSD</option><option>BTCUSD</option>
+</select>
+<button onclick="setPair()">Set Pair</button>
+</div>
+<div id="decision"></div>
+<div id="agentLogs"></div>
+<script>
+async function load(){
+ let r=await fetch('/master-signal'); let d=await r.json();
+ document.getElementById('decision').innerHTML=`<h2>Decision: ${d.decision}</h2><pre>${JSON.stringify(d,null,2)}</pre>`;
+ r=await fetch('/agent-log'); let logs=await r.json();
+ let html='';
+ logs.forEach(l=>{html+=`<div class="card"><strong>${l[1]}</strong> ${l[2]} (${l[3]})</div>`;});
+ document.getElementById('agentLogs').innerHTML=html;
+}
+async function setPair(){
+ let p=document.getElementById('pairSelect').value;
+ await fetch('/set-pair?pair='+p,{method:'POST'});
+}
+load();
+</script></body></html>
