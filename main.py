@@ -1,10 +1,8 @@
-# main.py – Tradevil AGI OS
+# main.py – Tradevil AGI OS (Complete)
 import os, json, sqlite3, datetime, threading, time as _time
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
 import uvicorn
 
 from agents.tech_agent import run_tech_analysis
@@ -20,15 +18,11 @@ from engines.daily_risk import DailyRiskTracker
 CONFIG_PATH = "config.json"
 with open(CONFIG_PATH) as f:
     config = json.load(f)
-# ---------- Load Config ----------
-CONFIG_PATH = "config.json"
-with open(CONFIG_PATH) as f:
-    config = json.load(f)
 
-# 🔐 API Key from environment (safe)
-import os
+# API Key from environment
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 config["gemini_api_key"] = GEMINI_API_KEY
+
 # ---------- Initialize ----------
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -36,7 +30,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 daily_tracker = DailyRiskTracker(config)
 risk_manager = RiskManager(config)
 strategy_selector = StrategySelector(config)
-gemini_analyst = GeminiAnalyst(config.get("gemini_api_key", ""))
+gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 backtest_engine = BacktestEngine(config)
 
 DB_PATH = "journal.db"
@@ -46,12 +40,24 @@ def init_db():
     con.executescript("""
         CREATE TABLE IF NOT EXISTS trade_journal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT, pair TEXT, signal TEXT, entry REAL, sl REAL, tp REAL,
-            outcome TEXT, pnl REAL, strategy_used TEXT, gemini_insight TEXT
+            timestamp TEXT,
+            pair TEXT,
+            signal TEXT,
+            entry REAL,
+            sl REAL,
+            tp REAL,
+            outcome TEXT,
+            pnl REAL,
+            strategy_used TEXT,
+            gemini_insight TEXT
         );
         CREATE TABLE IF NOT EXISTS agent_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hour TEXT, agent TEXT, action TEXT, prob REAL, details TEXT
+            hour TEXT,
+            agent TEXT,
+            action TEXT,
+            prob REAL,
+            details TEXT
         );
     """)
     con.commit()
@@ -59,82 +65,142 @@ def init_db():
 
 init_db()
 
-# ---------- Current pair state ----------
+# Current pair state
 current_pair = config["default_pair"]
 
-# ---------- Dashboard ----------
+# ---------- Routes ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
 
-# ---------- Pair Selector ----------
 @app.post("/set-pair")
 def set_pair(pair: str):
     global current_pair
     if pair in config["pairs"]:
         current_pair = pair
-        return {"status":"ok", "current_pair": pair}
+        return {"status": "ok", "current_pair": pair}
     raise HTTPException(400, "Invalid pair")
 
-# ---------- Master Signal ----------
+@app.get("/health")
+def health():
+    return {"status": "OK"}
+
 @app.get("/master-signal")
 def master_signal():
     daily_tracker.check_reset()
-    # 1. Market Data
+
+    # 1. Agent analysis
     tech = run_tech_analysis(current_pair)
     news = run_news_analysis()
     mtf = analyze_mtf(current_pair)
     risk_eval = risk_manager.evaluate()
-
-    # 2. Strategy Selection (AI picks best strategy)
     strategy = strategy_selector.select(current_pair, mtf)
-
-    # 3. Gemini Learning (why previous trades lost, market pattern)
     gemini_advice = gemini_analyst.analyze(tech, news, mtf, daily_tracker.stats())
 
-    # 4. Agent Probabilities (with strategy weight)
-    probs = {
-        "BUY": tech["prob_buy"]*0.4 + news["prob_buy"]*0.2 + risk_eval["prob_buy"]*0.2 + strategy["prob_buy"]*0.2,
-        "SELL": tech["prob_sell"]*0.4 + news["prob_sell"]*0.2 + risk_eval["prob_sell"]*0.2 + strategy["prob_sell"]*0.2,
-        "HOLD": tech["prob_hold"]*0.4 + news["prob_hold"]*0.2 + risk_eval["prob_hold"]*0.2 + strategy["prob_hold"]*0.2
+    # 2. Agent probabilities
+    tech_probs = {"BUY": tech["prob_buy"], "SELL": tech["prob_sell"], "HOLD": tech["prob_hold"]}
+    news_probs = {"BUY": news["prob_buy"], "SELL": news["prob_sell"], "HOLD": news["prob_hold"]}
+    risk_probs = {"BUY": risk_eval["prob_buy"], "SELL": risk_eval["prob_sell"], "HOLD": risk_eval["prob_hold"]}
+    strat_probs = {"BUY": strategy["prob_buy"], "SELL": strategy["prob_sell"], "HOLD": strategy["prob_hold"]}
+
+    w = config["parameters"]["agent_weights"]
+    final_probs = {
+        "BUY": tech_probs["BUY"]*w["tech"] + news_probs["BUY"]*w["news"] + risk_probs["BUY"]*w["risk"] + strat_probs["BUY"]*w["strategy"],
+        "SELL": tech_probs["SELL"]*w["tech"] + news_probs["SELL"]*w["news"] + risk_probs["SELL"]*w["risk"] + strat_probs["SELL"]*w["strategy"],
+        "HOLD": tech_probs["HOLD"]*w["tech"] + news_probs["HOLD"]*w["news"] + risk_probs["HOLD"]*w["risk"] + strat_probs["HOLD"]*w["strategy"]
     }
-    decision = max(probs, key=probs.get)
+    decision = max(final_probs, key=final_probs.get)
 
-    # 5. Risk & SL/TP from selected strategy
-    if decision in ("BUY","SELL"):
-        sl_tp = strategy["calculate_sltp"](decision, tech["current_price"])
-    else:
-        sl_tp = None
+    # 3. Risk Brief from tech analysis (accurate entry, SL, TP)
+    risk_brief = None
+    if decision in ("BUY","SELL") and tech.get("entry_zone") and tech.get("stop_loss") and tech.get("take_profit"):
+        if decision == "BUY":
+            entry = tech["entry_zone"][0]   # buy at bottom of FVG
+            sl = tech["stop_loss"]
+            tp = tech["take_profit"]
+        else:
+            entry = tech["entry_zone"][1]   # sell at top of FVG
+            sl = tech["stop_loss"]
+            tp = tech["take_profit"]
+        risk_brief = {"entry": round(entry,2), "sl": round(sl,2), "tp": round(tp,2)}
 
-    # 6. Log
+    # 4. Log to trade journal
     con = sqlite3.connect(DB_PATH)
-    con.execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
-                (datetime.datetime.utcnow().isoformat(), current_pair, decision,
-                 tech["current_price"], sl_tp["sl"] if sl_tp else None,
-                 sl_tp["tp"] if sl_tp else None, strategy["name"], gemini_advice.get("summary")))
+    con.execute("""
+        INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (
+        datetime.datetime.utcnow().isoformat(),
+        current_pair,
+        decision,
+        risk_brief["entry"] if risk_brief else None,
+        risk_brief["sl"] if risk_brief else None,
+        risk_brief["tp"] if risk_brief else None,
+        strategy["name"],
+        gemini_advice.get("summary", "")
+    ))
     con.commit()
     con.close()
 
+    # 5. Log agent activity
+    hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
+    con2 = sqlite3.connect(DB_PATH)
+    for ag_name, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
+        action = max(probs, key=probs.get)
+        con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                     (hour, ag_name, action, probs[action], json.dumps(probs)))
+    con2.commit()
+    con2.close()
+
     return {
-        "decision": decision, "probabilities": probs,
-        "risk_brief": sl_tp, "strategy_used": strategy["name"],
+        "decision": decision,
+        "probabilities": final_probs,
+        "risk_brief": risk_brief,
+        "strategy_used": strategy["name"],
         "gemini_advice": gemini_advice
     }
 
-# ---------- Backtest & Auto-Upgrade (triggered by scheduler) ----------
+@app.get("/agent-log")
+def agent_log():
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute("""
+        SELECT hour, agent, action, prob, details
+        FROM agent_log
+        WHERE hour >= datetime('now', '-1 hour')
+        ORDER BY id DESC LIMIT 20
+    """).fetchall()
+    con.close()
+    return [{"hour": r[0], "agent": r[1], "action": r[2], "prob": r[3], "details": r[4]} for r in rows]
+
+@app.get("/today-trades")
+def today_trades():
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute("""
+        SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl
+        FROM trade_journal
+        WHERE date(timestamp) = date('now')
+        ORDER BY timestamp DESC
+    """).fetchall()
+    con.close()
+    trades = []
+    for r in rows:
+        trades.append({
+            "timestamp": r[0],
+            "pair": r[1],
+            "signal": r[2],
+            "entry": r[3],
+            "sl": r[4],
+            "tp": r[5],
+            "outcome": r[6],
+            "pnl": r[7]
+        })
+    return trades
+
 @app.post("/auto-upgrade")
 def auto_upgrade():
     best_strategy = backtest_engine.run(current_pair, strategy_selector.get_all())
     strategy_selector.promote(best_strategy)
     return {"new_top_strategy": best_strategy["name"]}
-
-# ---------- Agent logs for dashboard ----------
-@app.get("/agent-log")
-def agent_log():
-    con = sqlite3.connect(DB_PATH)
-    rows = con.execute("SELECT * FROM agent_log ORDER BY id DESC LIMIT 50").fetchall()
-    con.close()
-    return rows
 
 # ---------- Scheduler for weekly optimization ----------
 import schedule
