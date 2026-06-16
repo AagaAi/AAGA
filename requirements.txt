@@ -1,9 +1,7 @@
 fastapi
 uvicorn
-yfinance
 pandas
 numpy
-feedparser
 pydantic
-schedule
-google-generativeai
+requests
+metaapi-cloud-sdk
