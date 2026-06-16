@@ -1,11 +1,11 @@
-# main.py – Tradevil AGI OS (Complete & Corrected)
+# main.py – Tradevil AGI OS (Sniper Upgrade)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from agents.tech_agent import run_tech_analysis
+from agents.sniper_agent import run_sniper_analysis
 from agents.news_agent import run_news_analysis
 from agents.risk_agent import RiskManager
 from agents.strategy_agent import StrategySelector
@@ -19,11 +19,9 @@ CONFIG_PATH = "config.json"
 with open(CONFIG_PATH) as f:
     config = json.load(f)
 
-# API Key from environment
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 config["gemini_api_key"] = GEMINI_API_KEY
 
-# ---------- Initialize ----------
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -40,24 +38,12 @@ def init_db():
     con.executescript("""
         CREATE TABLE IF NOT EXISTS trade_journal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            pair TEXT,
-            signal TEXT,
-            entry REAL,
-            sl REAL,
-            tp REAL,
-            outcome TEXT,
-            pnl REAL,
-            strategy_used TEXT,
-            gemini_insight TEXT
+            timestamp TEXT, pair TEXT, signal TEXT, entry REAL, sl REAL, tp REAL,
+            outcome TEXT, pnl REAL, strategy_used TEXT, gemini_insight TEXT
         );
         CREATE TABLE IF NOT EXISTS agent_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hour TEXT,
-            agent TEXT,
-            action TEXT,
-            prob REAL,
-            details TEXT
+            hour TEXT, agent TEXT, action TEXT, prob REAL, details TEXT
         );
     """)
     con.commit()
@@ -65,13 +51,9 @@ def init_db():
 
 init_db()
 
-# Current pair state
 current_pair = config["default_pair"]
-
-# Gemini throttle state
 _last_gemini_call = None
 
-# ---------- Routes ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
@@ -88,34 +70,41 @@ def set_pair(pair: str):
 def health():
     return {"status": "OK"}
 
-@app.get("/test-tech-agent")
-def test_tech_agent():
-    """Diagnostic endpoint to check if Tech Agent returns signals."""
-    return run_tech_analysis(current_pair)
+@app.get("/test-sniper")
+def test_sniper():
+    return run_sniper_analysis(current_pair)
 
 @app.get("/master-signal")
 def master_signal():
     global _last_gemini_call
     daily_tracker.check_reset()
 
-    # 1. Agent analysis
-    tech = run_tech_analysis(current_pair)
+    # 1. Sniper Analysis (main trading engine)
+    sniper = run_sniper_analysis(current_pair)
+
+    # 2. Other agents (still provide probabilities)
     news = run_news_analysis()
     mtf = analyze_mtf(current_pair)
     risk_eval = risk_manager.evaluate()
     strategy = strategy_selector.select(current_pair, mtf)
 
-    # Gemini call only if actionable trade AND at least 1 hour since last call (quota saver)
+    # 3. Gemini call (throttled)
     now = datetime.datetime.utcnow()
-    if (tech.get("signal") in ("BUY", "SELL") and
+    if (sniper["signal"] in ("BUY", "SELL") and
         (_last_gemini_call is None or (now - _last_gemini_call).seconds > 3600)):
-        gemini_advice = gemini_analyst.analyze(tech, news, mtf, daily_tracker.stats())
+        gemini_advice = gemini_analyst.analyze(sniper, news, mtf, daily_tracker.stats())
         _last_gemini_call = now
     else:
-        gemini_advice = {"summary": "Gemini throttled (quota saver)", "recommended_action": tech.get("signal", "HOLD"), "confidence": 0.5}
+        gemini_advice = {"summary": "Gemini throttled / quota exceeded", "recommended_action": sniper.get("signal", "HOLD"), "confidence": 0.5}
 
-    # 2. Agent probabilities
-    tech_probs = {"BUY": tech["prob_buy"], "SELL": tech["prob_sell"], "HOLD": tech["prob_hold"]}
+    # 4. Probability combination (weighted, but Sniper dominates)
+    sniper_prob = {"BUY": 0.0, "SELL": 0.0, "HOLD": 1.0}
+    if sniper["signal"] == "BUY":
+        sniper_prob = {"BUY": 0.9, "SELL": 0.0, "HOLD": 0.1}
+    elif sniper["signal"] == "SELL":
+        sniper_prob = {"BUY": 0.0, "SELL": 0.9, "HOLD": 0.1}
+
+    tech_probs = sniper_prob
     news_probs = {"BUY": news["prob_buy"], "SELL": news["prob_sell"], "HOLD": news["prob_hold"]}
     risk_probs = {"BUY": risk_eval["prob_buy"], "SELL": risk_eval["prob_sell"], "HOLD": risk_eval["prob_hold"]}
     strat_probs = {"BUY": strategy["prob_buy"], "SELL": strategy["prob_sell"], "HOLD": strategy["prob_hold"]}
@@ -128,39 +117,24 @@ def master_signal():
     }
     decision = max(final_probs, key=final_probs.get)
 
-    # 3. Risk Brief from tech analysis (accurate entry, SL, TP)
+    # 5. Risk Brief from sniper analysis
     risk_brief = None
-    if decision in ("BUY","SELL") and tech.get("entry_zone") and tech.get("stop_loss") and tech.get("take_profit"):
+    if decision in ("BUY","SELL") and sniper.get("entry_zone") and sniper.get("sl") and sniper.get("tp"):
         if decision == "BUY":
-            entry = tech["entry_zone"][0]   # buy at bottom of FVG
-            sl = tech["stop_loss"]
-            tp = tech["take_profit"]
+            entry = sniper["entry_zone"][0]
         else:
-            entry = tech["entry_zone"][1]   # sell at top of FVG
-            sl = tech["stop_loss"]
-            tp = tech["take_profit"]
-        risk_brief = {"entry": round(entry,2), "sl": round(sl,2), "tp": round(tp,2)}
+            entry = sniper["entry_zone"][1]
+        risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
 
-    # 4. Log to trade journal ONLY if actionable trade
+    # 6. Log to trade journal
     if decision in ("BUY", "SELL") and risk_brief:
         con = sqlite3.connect(DB_PATH)
-        con.execute("""
-            INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight)
-            VALUES (?,?,?,?,?,?,?,?)
-        """, (
-            now.isoformat(),
-            current_pair,
-            decision,
-            risk_brief["entry"],
-            risk_brief["sl"],
-            risk_brief["tp"],
-            strategy["name"],
-            gemini_advice.get("summary", "")
-        ))
+        con.execute("INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
+                    (now.isoformat(), current_pair, decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strategy["name"], gemini_advice.get("summary","")))
         con.commit()
         con.close()
 
-    # 5. Log agent activity (always)
+    # 7. Agent activity log
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag_name, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
@@ -170,49 +144,34 @@ def master_signal():
     con2.commit()
     con2.close()
 
+    # 8. Return with extra trend/sweep info for dashboard
     return {
         "decision": decision,
         "probabilities": final_probs,
         "risk_brief": risk_brief,
         "strategy_used": strategy["name"],
-        "gemini_advice": gemini_advice
+        "gemini_advice": gemini_advice,
+        "market_trend": sniper.get("trend", "N/A"),
+        "sweep_detected": sniper.get("sweep_detected", False),
+        "sweep_type": sniper.get("sweep_type"),
+        "mss": sniper.get("mss"),
+        "fvg": sniper.get("fvg"),
+        "current_price": sniper.get("current_price")
     }
 
 @app.get("/agent-log")
 def agent_log():
     con = sqlite3.connect(DB_PATH)
-    rows = con.execute("""
-        SELECT hour, agent, action, prob, details
-        FROM agent_log
-        WHERE hour >= datetime('now', '-1 hour')
-        ORDER BY id DESC LIMIT 20
-    """).fetchall()
+    rows = con.execute("SELECT hour, agent, action, prob, details FROM agent_log WHERE hour >= datetime('now','-1 hour') ORDER BY id DESC LIMIT 20").fetchall()
     con.close()
     return [{"hour": r[0], "agent": r[1], "action": r[2], "prob": r[3], "details": r[4]} for r in rows]
 
 @app.get("/today-trades")
 def today_trades():
     con = sqlite3.connect(DB_PATH)
-    rows = con.execute("""
-        SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl
-        FROM trade_journal
-        WHERE date(timestamp) = date('now')
-        ORDER BY timestamp DESC
-    """).fetchall()
+    rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
     con.close()
-    trades = []
-    for r in rows:
-        trades.append({
-            "timestamp": r[0],
-            "pair": r[1],
-            "signal": r[2],
-            "entry": r[3],
-            "sl": r[4],
-            "tp": r[5],
-            "outcome": r[6],
-            "pnl": r[7]
-        })
-    return trades
+    return [{"timestamp": r[0], "pair": r[1], "signal": r[2], "entry": r[3], "sl": r[4], "tp": r[5], "outcome": r[6], "pnl": r[7]} for r in rows]
 
 @app.post("/auto-upgrade")
 def auto_upgrade():
@@ -220,7 +179,6 @@ def auto_upgrade():
     strategy_selector.promote(best_strategy)
     return {"new_top_strategy": best_strategy["name"]}
 
-# ---------- Scheduler for weekly optimization ----------
 import schedule
 def scheduler_thread():
     schedule.every().sunday.at("00:00").do(auto_upgrade)
