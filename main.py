@@ -20,7 +20,15 @@ from engines.daily_risk import DailyRiskTracker
 CONFIG_PATH = "config.json"
 with open(CONFIG_PATH) as f:
     config = json.load(f)
+# ---------- Load Config ----------
+CONFIG_PATH = "config.json"
+with open(CONFIG_PATH) as f:
+    config = json.load(f)
 
+# 🔐 API Key from environment (safe)
+import os
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+config["gemini_api_key"] = GEMINI_API_KEY
 # ---------- Initialize ----------
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
