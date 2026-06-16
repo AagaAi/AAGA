@@ -1,4 +1,4 @@
-import os
+import os, json
 import google.generativeai as genai
 
 class GeminiAnalyst:
@@ -6,29 +6,43 @@ class GeminiAnalyst:
         key = api_key or os.environ.get("GEMINI_API_KEY")
         if key:
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel("gemini-1.5-flash")
+            # Use stable model "gemini-pro"
+            self.model = genai.GenerativeModel("gemini-pro")
             self.available = True
         else:
             self.available = False
 
     def analyze(self, tech, news, mtf, daily_stats):
         if not self.available:
-            return {"summary": "Gemini API key not set"}
+            return {"summary": "Gemini API key not set", "recommended_action": "HOLD", "confidence": 0.5}
         try:
-            prompt = f"""You are a senior trading analyst. Analyze this market data and provide a short recommendation with reasoning.
+            prompt = f"""
+You are a senior trading analyst. Analyze this XAUUSD data and provide a short recommendation.
 
-Market Data:
-- Pair: XAUUSD
-- Price: {tech['current_price']}
-- Tech Signal: {tech.get('signal')}
-- News Risk: {news}
-- MTF Bias: {mtf.get('htf_bias')}, Confluence: {mtf.get('confluence_score')}
-- Daily P&L: {daily_stats}
+Tech Signal: {tech.get('signal', 'None')}
+Price: {tech['current_price']}
+Entry Zone: {tech.get('entry_zone')}
+Stop Loss: {tech.get('stop_loss')}
+Take Profit: {tech.get('take_profit')}
+News Risk Level: {news}
+MTF Bias: {mtf.get('htf_bias')}, Confluence Score: {mtf.get('confluence_score')}
+Daily P&L stats: {daily_stats}
 
-Return a JSON object with keys: "summary", "recommended_action" (BUY/SELL/HOLD), "confidence" (0-1), "reasoning"."""
+Return ONLY a JSON object (no other text) with keys:
+"summary" (short string),
+"recommended_action" (BUY/SELL/HOLD),
+"confidence" (float 0-1),
+"reasoning" (string).
+"""
             resp = self.model.generate_content(prompt)
-            # Try to parse JSON from response
-            import json
-            return json.loads(resp.text.replace("```json","").replace("```",""))
+            # Extract JSON
+            text = resp.text
+            # Remove any markdown fences
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0]
+            parsed = json.loads(text)
+            return parsed
         except Exception as e:
-            return {"summary": f"Gemini error: {e}"}
+            return {"summary": f"Gemini error: {str(e)}", "recommended_action": "HOLD", "confidence": 0.5}
