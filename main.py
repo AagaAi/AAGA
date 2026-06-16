@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (MetaApi REST Data + Sniper + Paper Trading)
+# main.py – Tradevil AGI OS (MetaApi Correct REST + SDK Fallback)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import requests
 import pandas as pd
+import asyncio
+from metaapi_cloud_sdk import MetaApi
 
 # ---------- Config ----------
 CONFIG_PATH = "config.json"
@@ -18,30 +20,56 @@ METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ========== MetaApi REST Data Fetching ==========
+# ========== MetaApi Data Fetching ==========
 BASE_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 
 def rest_get_candles(symbol, timeframe, limit=500):
-    """Fetch candles via MetaApi REST API (synchronous)."""
+    """First try correct REST endpoint."""
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return None
-    url = f"{BASE_URL}/users/current/accounts/{METAAPI_ACCOUNT_ID}/historical-candles/{symbol}/{timeframe}"
-    headers = {
-        "auth-token": METAAPI_TOKEN,
-        "Content-Type": "application/json"
-    }
-    params = {"limit": limit, "fillMissingCandles": "true"}
+    url = f"{BASE_URL}/users/current/accounts/{METAAPI_ACCOUNT_ID}/historical-market-data/symbols/{symbol}/timeframes/{timeframe}/candles"
+    headers = {"auth-token": METAAPI_TOKEN, "Content-Type": "application/json"}
+    params = {"limit": limit}
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=15)
-        if resp.status_code != 200:
-            print(f"MetaApi REST error {resp.status_code}: {resp.text}")
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            print(f"REST error {resp.status_code}: {resp.text}")
             return None
-        data = resp.json()
-        # data is a list of dicts: time, open, high, low, close, volume
-        return data
     except Exception as e:
-        print(f"MetaApi REST exception: {e}")
+        print(f"REST exception: {e}")
         return None
+
+def sdk_get_candles(symbol, timeframe, limit=500):
+    """Fallback: use MetaApi SDK (async run in a new event loop)."""
+    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
+        return None
+    async def _fetch():
+        api = MetaApi(METAAPI_TOKEN)
+        account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
+        connection = account.connect()
+        await connection.wait_synchronized()
+        try:
+            candles = await connection.get_historical_candles(symbol, timeframe, limit)
+            return candles
+        finally:
+            await connection.close()
+    try:
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(_fetch())
+        return result
+    except Exception as e:
+        print(f"SDK fetch error: {e}")
+        return None
+
+def get_candles(symbol, timeframe, limit=500):
+    """Combined: REST first, fallback to SDK."""
+    data = rest_get_candles(symbol, timeframe, limit)
+    if data is not None and len(data) >= limit//2:
+        return data
+    print("REST failed or insufficient data, trying SDK...")
+    return sdk_get_candles(symbol, timeframe, limit)
 
 # ========== Sniper Logic ==========
 def detect_swing_points(candles, lookback=3):
@@ -101,8 +129,8 @@ def run_sniper_analysis():
             "mss": None, "fvg": None, "current_price": 0
         }
 
-    raw15 = rest_get_candles("XAUUSD", "15m", 500)
-    raw1  = rest_get_candles("XAUUSD", "1m", 500)
+    raw15 = get_candles("XAUUSD", "15m", 500)
+    raw1  = get_candles("XAUUSD", "1m", 500)
 
     if raw15 is None or raw1 is None or len(raw15) < 50 or len(raw1) < 10:
         return {
@@ -112,12 +140,11 @@ def run_sniper_analysis():
             "mss": None, "fvg": None, "current_price": 0
         }
 
-    # Convert to list of dicts (MetaApi REST returns lowercase keys)
+    # MetaApi returns keys: time, open, high, low, close, volume
     candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
     candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
     current_price = candles1[-1]["close"]
 
-    # Trend from 15m SMA
     closes15 = pd.Series([c["close"] for c in candles15])
     sma15 = closes15.rolling(50).mean()
     if len(sma15) >= 2:
@@ -126,7 +153,6 @@ def run_sniper_analysis():
     else:
         trend = "Unknown"
 
-    # Sweeps
     sh, sl = detect_swing_points(candles15, 3)
     sweeps = detect_liquidity_sweep(candles15, sh, sl)
     latest_sweep = sweeps[-1] if sweeps else None
@@ -172,69 +198,53 @@ def run_sniper_analysis():
         "current_price": current_price
     }
 
-# ========== Paper Trading Checker (uses MetaApi REST for live price) ==========
+# ========== Paper Trading Checker ==========
 def check_open_trades():
     while True:
         try:
-            current_price = None
-            if METAAPI_TOKEN and METAAPI_ACCOUNT_ID:
-                raw = rest_get_candles("XAUUSD", "1m", 1)
-                if raw and len(raw) > 0:
-                    current_price = raw[0]["close"]
-            if current_price is None:
+            raw = get_candles("XAUUSD", "1m", 1)
+            if raw is None or len(raw) == 0:
                 _time.sleep(15)
                 continue
+            current_price = raw[0]["close"]
 
             con = sqlite3.connect(DB_PATH)
-            trades = con.execute(
-                "SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL"
-            ).fetchall()
+            trades = con.execute("SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL").fetchall()
             for tid, pair, sig, entry, sl, tp in trades:
-                if entry is None:
-                    continue
-                outcome = None
-                pnl = None
+                if entry is None: continue
+                outcome = None; pnl = None
                 if sig == "BUY":
                     if current_price <= sl:
-                        outcome = "LOSS"
-                        pnl = round((sl - entry) * 100, 2)
+                        outcome = "LOSS"; pnl = round((sl - entry) * 100, 2)
                     elif current_price >= tp:
-                        outcome = "WIN"
-                        pnl = round((tp - entry) * 100, 2)
+                        outcome = "WIN"; pnl = round((tp - entry) * 100, 2)
                 else:
                     if current_price >= sl:
-                        outcome = "LOSS"
-                        pnl = round((entry - sl) * 100, 2)
+                        outcome = "LOSS"; pnl = round((entry - sl) * 100, 2)
                     elif current_price <= tp:
-                        outcome = "WIN"
-                        pnl = round((entry - tp) * 100, 2)
-
+                        outcome = "WIN"; pnl = round((entry - tp) * 100, 2)
                 if outcome:
-                    con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?",
-                                (outcome, pnl, tid))
+                    con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?", (outcome, pnl, tid))
                     con.commit()
             con.close()
         except Exception as e:
             print(f"Paper trade checker error: {e}")
         _time.sleep(15)
 
-# ---------- Agents (simplified) ----------
+# ---------- Other Agents ----------
 def run_news_analysis():
     return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
 class RiskManager:
-    def evaluate(self):
-        return {"prob_buy":0.33, "prob_sell":0.33, "prob_hold":0.34}
+    def evaluate(self): return {"prob_buy":0.33, "prob_sell":0.33, "prob_hold":0.34}
 
 class StrategySelector:
     def __init__(self, config): pass
-    def select(self, pair, mtf):
-        return {"name":"default", "prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
+    def select(self, pair, mtf): return {"name":"default","prob_buy":0.5,"prob_sell":0.5,"prob_hold":0.0}
 
 class GeminiAnalyst:
     def __init__(self, key): pass
-    def analyze(self, *args):
-        return {"summary": "Gemini throttled"}
+    def analyze(self, *args): return {"summary":"Gemini throttled"}
 
 # ---------- Initialize ----------
 daily_tracker = type('',(object,),{"check_reset":lambda self:None,"stats":lambda self:{"daily_pnl":0}})()
@@ -269,10 +279,9 @@ def dashboard():
 
 @app.get("/test-metaapi")
 def test_metaapi():
-    """Debug endpoint to verify MetaApi REST connection."""
-    raw = rest_get_candles("XAUUSD", "1m", 5)
+    raw = get_candles("XAUUSD", "1m", 5)
     if raw is None:
-        return {"status": "error", "message": "MetaApi returned no data. Check keys or account status."}
+        return {"status": "error", "message": "No data from MetaApi. Check account and keys."}
     return {"status": "ok", "candles": raw[-5:]}
 
 @app.get("/master-signal")
@@ -309,7 +318,6 @@ def master_signal():
     if decision in ("BUY","SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
         entry = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
-
         con = sqlite3.connect(DB_PATH)
         con.execute("INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
                     (now.isoformat(), "XAUUSD", decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strategy["name"], gemini_advice.get("summary","")))
