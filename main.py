@@ -1,50 +1,46 @@
-# main.py – Tradevil AGI OS (Twelve Data XAUUSD Sniper + Paper Trading)
+# main.py – Tradevil AGI OS (MetaApi Live Data + Execution)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import requests
 import pandas as pd
+import asyncio
+from metaapi_cloud_sdk import MetaApi
 
 # ---------- Config ----------
 CONFIG_PATH = "config.json"
 with open(CONFIG_PATH) as f:
     config = json.load(f)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
+METAAPI_TOKEN = os.environ.get("METAAPI_TOKEN", "")
+METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ========== Helper: Fetch candles via Twelve Data ==========
-def fetch_twelvedata(symbol, interval, outputsize=500):
-    """Fetch historical candles from Twelve Data. Returns DataFrame or None."""
-    if not TWELVE_DATA_API_KEY:
+# ========== MetaApi Data Fetching ==========
+async def get_metaapi_candles(symbol, timeframe, limit=500):
+    api = MetaApi(METAAPI_TOKEN)
+    account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
+    connection = account.connect()
+    await connection.wait_synchronized()
+    candles = await connection.get_historical_candles(symbol, timeframe, limit)
+    return candles
+
+def fetch_candles_sync(symbol, timeframe, limit=500):
+    """Wrapper to call async get_metaapi_candles from sync context."""
+    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return None
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": outputsize,
-        "apikey": TWELVE_DATA_API_KEY,
-        "format": "JSON"
-    }
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        data = resp.json()
-        if "values" not in data:
-            return None
-        df = pd.DataFrame(data["values"])
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        df = df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
-        df.set_index("datetime", inplace=True)
-        df = df.sort_index()
-        return df
-    except Exception:
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(get_metaapi_candles(symbol, timeframe, limit))
+        return result
+    except Exception as e:
+        print(f"MetaApi fetch error: {e}")
         return None
 
-# ========== Sniper Logic (using Twelve Data) ==========
+# ========== Sniper Logic (adapted for MetaApi candles) ==========
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
     for i in range(lookback, len(candles) - lookback):
@@ -94,35 +90,46 @@ def detect_fvg(candles):
     return None
 
 def run_sniper_analysis():
-    # Fetch 15m and 1m data for XAU/USD from Twelve Data
-    df15 = fetch_twelvedata("XAU/USD", "15min", 500)
-    df1  = fetch_twelvedata("XAU/USD", "1min", 500)
-
-    if df15 is None or df1 is None or df15.empty or df1.empty or len(df15) < 50 or len(df1) < 10:
+    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return {
             "signal": "HOLD",
             "entry_zone": None, "sl": None, "tp": None,
-            "trend": "Data Unavailable",
-            "sweep_detected": False, "sweep_type": None, "sweep_level": None,
+            "trend": "MetaApi keys missing",
+            "sweep_detected": False,
+            "sweep_type": None, "sweep_level": None,
             "mss": None, "fvg": None,
-            "current_price": 0,
-            "source": "twelvedata" if TWELVE_DATA_API_KEY else "no_key"
+            "current_price": 0
         }
 
-    # Convert DataFrames to list of dicts
-    candles15 = [{"high": float(r.High), "low": float(r.Low), "close": float(r.Close)} for r in df15.itertuples()]
-    candles1  = [{"high": float(r.High), "low": float(r.Low), "close": float(r.Close)} for r in df1.itertuples()]
+    raw15 = fetch_candles_sync("XAUUSD", "15m", 500)
+    raw1  = fetch_candles_sync("XAUUSD", "1m", 500)
+
+    if raw15 is None or raw1 is None or len(raw15) < 50 or len(raw1) < 10:
+        return {
+            "signal": "HOLD",
+            "entry_zone": None, "sl": None, "tp": None,
+            "trend": "Insufficient data",
+            "sweep_detected": False,
+            "sweep_type": None, "sweep_level": None,
+            "mss": None, "fvg": None,
+            "current_price": 0
+        }
+
+    # Convert to list of dicts (MetaApi candles: open, high, low, close, time)
+    candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
+    candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
     current_price = candles1[-1]["close"]
 
     # Trend from 15m SMA
-    sma15 = df15["Close"].rolling(50).mean()
+    closes15 = pd.Series([c["close"] for c in candles15])
+    sma15 = closes15.rolling(50).mean()
     if len(sma15) >= 2:
         slope = sma15.iloc[-1] - sma15.iloc[-2]
         trend = "UPTREND" if slope > 0 else "DOWNTREND" if slope < 0 else "SIDEWAYS"
     else:
         trend = "Unknown"
 
-    # 15m Sweep
+    # Sweeps
     sh, sl = detect_swing_points(candles15, 3)
     sweeps = detect_liquidity_sweep(candles15, sh, sl)
     latest_sweep = sweeps[-1] if sweeps else None
@@ -134,11 +141,9 @@ def run_sniper_analysis():
             "trend": trend, "sweep_detected": False,
             "sweep_type": None, "sweep_level": None,
             "mss": None, "fvg": None,
-            "current_price": current_price,
-            "source": "twelvedata"
+            "current_price": current_price
         }
 
-    # 1m confirmation
     mss = detect_mss(candles1, 3)
     fvg = detect_fvg(candles1)
 
@@ -169,14 +174,52 @@ def run_sniper_analysis():
         "sweep_level": latest_sweep["level"],
         "mss": mss,
         "fvg": fvg,
-        "current_price": current_price,
-        "source": "twelvedata"
+        "current_price": current_price
     }
 
-# ========== Paper Trading Engine ==========
+# ========== MetaApi Trade Execution ==========
+async def place_metaapi_order(signal, entry, sl, tp):
+    api = MetaApi(METAAPI_TOKEN)
+    account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
+    connection = account.connect()
+    await connection.wait_synchronized()
+    if signal == "BUY":
+        await connection.create_market_buy_order(
+            symbol="XAUUSD", volume=0.01, stop_loss=sl, take_profit=tp, comment="Tradevil AI"
+        )
+    else:
+        await connection.create_market_sell_order(
+            symbol="XAUUSD", volume=0.01, stop_loss=sl, take_profit=tp, comment="Tradevil AI"
+        )
+
+def execute_trade_sync(signal, entry, sl, tp):
+    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
+        print("MetaApi keys missing – order not placed")
+        return
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(place_metaapi_order(signal, entry, sl, tp))
+    except Exception as e:
+        print(f"Order failed: {e}")
+
+# ========== Paper Trading Checker (uses MetaApi price) ==========
 def check_open_trades():
     while True:
         try:
+            # Get current price from MetaApi
+            current_price = None
+            if METAAPI_TOKEN and METAAPI_ACCOUNT_ID:
+                try:
+                    loop = asyncio.new_event_loop()
+                    raw = loop.run_until_complete(get_metaapi_candles("XAUUSD", "1m", 1))
+                    if raw:
+                        current_price = raw[0]["close"]
+                except:
+                    pass
+            if current_price is None:
+                _time.sleep(15)
+                continue
+
             con = sqlite3.connect(DB_PATH)
             trades = con.execute(
                 "SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL"
@@ -184,28 +227,20 @@ def check_open_trades():
             for tid, pair, sig, entry, sl, tp in trades:
                 if entry is None:
                     continue
-                # Get live price from Twelve Data (or fallback)
-                try:
-                    url = "https://api.twelvedata.com/price?symbol=XAU/USD&apikey=" + TWELVE_DATA_API_KEY
-                    resp = requests.get(url, timeout=5).json()
-                    current = float(resp.get("price", 0))
-                except:
-                    continue
-
                 outcome = None
                 pnl = None
                 if sig == "BUY":
-                    if current <= sl:
+                    if current_price <= sl:
                         outcome = "LOSS"
                         pnl = round((sl - entry) * 100, 2)
-                    elif current >= tp:
+                    elif current_price >= tp:
                         outcome = "WIN"
                         pnl = round((tp - entry) * 100, 2)
                 else:  # SELL
-                    if current >= sl:
+                    if current_price >= sl:
                         outcome = "LOSS"
                         pnl = round((entry - sl) * 100, 2)
-                    elif current <= tp:
+                    elif current_price <= tp:
                         outcome = "WIN"
                         pnl = round((entry - tp) * 100, 2)
 
@@ -215,10 +250,10 @@ def check_open_trades():
                     con.commit()
             con.close()
         except Exception as e:
-            print(f"Paper trade checker: {e}")
+            print(f"Paper trade checker error: {e}")
         _time.sleep(15)
 
-# ---------- Agents ----------
+# ---------- Agents (simplified) ----------
 def run_news_analysis():
     return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
@@ -260,6 +295,7 @@ def init_db():
     con.close()
 init_db()
 
+# Start background threads
 threading.Thread(target=check_open_trades, daemon=True).start()
 
 # ---------- Routes ----------
@@ -302,12 +338,17 @@ def master_signal():
         entry = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
 
+        # Log trade
         con = sqlite3.connect(DB_PATH)
         con.execute("INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
                     (now.isoformat(), "XAUUSD", decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strategy["name"], gemini_advice.get("summary","")))
         con.commit()
         con.close()
 
+        # Execute live order on MT5 demo account
+        execute_trade_sync(decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"])
+
+    # Agent log
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
@@ -329,7 +370,7 @@ def master_signal():
         "mss": sniper["mss"],
         "fvg": sniper["fvg"],
         "current_price": sniper["current_price"],
-        "source": sniper.get("source","twelvedata")
+        "data_source": "MetaApi"
     }
 
 @app.get("/agent-log")
