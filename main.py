@@ -68,6 +68,9 @@ init_db()
 # Current pair state
 current_pair = config["default_pair"]
 
+# Gemini throttle state
+_last_gemini_call = None
+
 # ---------- Routes ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -85,8 +88,14 @@ def set_pair(pair: str):
 def health():
     return {"status": "OK"}
 
+@app.get("/test-tech-agent")
+def test_tech_agent():
+    """Diagnostic endpoint to check if Tech Agent returns signals."""
+    return run_tech_analysis(current_pair)
+
 @app.get("/master-signal")
 def master_signal():
+    global _last_gemini_call
     daily_tracker.check_reset()
 
     # 1. Agent analysis
@@ -95,7 +104,15 @@ def master_signal():
     mtf = analyze_mtf(current_pair)
     risk_eval = risk_manager.evaluate()
     strategy = strategy_selector.select(current_pair, mtf)
-    gemini_advice = gemini_analyst.analyze(tech, news, mtf, daily_tracker.stats())
+
+    # Gemini call only if actionable trade AND at least 1 hour since last call (quota saver)
+    now = datetime.datetime.utcnow()
+    if (tech.get("signal") in ("BUY", "SELL") and
+        (_last_gemini_call is None or (now - _last_gemini_call).seconds > 3600)):
+        gemini_advice = gemini_analyst.analyze(tech, news, mtf, daily_tracker.stats())
+        _last_gemini_call = now
+    else:
+        gemini_advice = {"summary": "Gemini throttled (quota saver)", "recommended_action": tech.get("signal", "HOLD"), "confidence": 0.5}
 
     # 2. Agent probabilities
     tech_probs = {"BUY": tech["prob_buy"], "SELL": tech["prob_sell"], "HOLD": tech["prob_hold"]}
@@ -131,7 +148,7 @@ def master_signal():
             INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight)
             VALUES (?,?,?,?,?,?,?,?)
         """, (
-            datetime.datetime.utcnow().isoformat(),
+            now.isoformat(),
             current_pair,
             decision,
             risk_brief["entry"],
@@ -144,7 +161,7 @@ def master_signal():
         con.close()
 
     # 5. Log agent activity (always)
-    hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
+    hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag_name, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
         action = max(probs, key=probs.get)
