@@ -1,8 +1,4 @@
-# main.py – Tradevil AGI OS
-# MetaApi SDK v29 – VERIFIED from official docs
-# get_historical_candles with PAST start_time (not utcnow)
-# start_time = now + some future buffer so all recent candles come back
-
+# main.py – Tradevil AGI OS (comment argument removed)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -29,11 +25,9 @@ app.add_middleware(
 
 # ============================================================
 # SINGLE shared MetaApi instance + connection (reused)
-# Avoids reconnecting on every request
 # ============================================================
 _api_instance   = None
 _account_cache  = None
-_connect_lock   = threading.Lock()
 
 async def get_account():
     global _api_instance, _account_cache
@@ -52,7 +46,6 @@ async def get_account():
 # ============================================================
 def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
-        print("MetaApi credentials missing.")
         return None
 
     async def _fetch():
@@ -85,11 +78,11 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
         loop.close()
         return result
     except Exception as e:
-        print(f"SDK error: {e}")
+        print(f"SDK fetch error: {e}")
         return None
 
 # ============================================================
-# sdk_get_price — RPC live price (fallback)
+# sdk_get_price
 # ============================================================
 def sdk_get_price(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
@@ -117,7 +110,7 @@ def sdk_get_price(symbol: str):
         return None
 
 # ============================================================
-# execute_trade_sync — Place market order with SL/TP on MT5
+# execute_trade_sync (NO comment argument)
 # ============================================================
 def execute_trade_sync(signal, sl, tp, lot=0.01):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
@@ -135,16 +128,14 @@ def execute_trade_sync(signal, sl, tp, lot=0.01):
                     symbol="XAUUSD",
                     volume=lot,
                     stop_loss=sl,
-                    take_profit=tp,
-                    comment="Tradevil AI"
+                    take_profit=tp
                 )
             else:
                 order = await conn.create_market_sell_order(
                     symbol="XAUUSD",
                     volume=lot,
                     stop_loss=sl,
-                    take_profit=tp,
-                    comment="Tradevil AI"
+                    take_profit=tp
                 )
             return order
         finally:
@@ -161,7 +152,7 @@ def execute_trade_sync(signal, sl, tp, lot=0.01):
         return None
 
 # ============================================================
-# Sniper Logic (SMC: Sweep → MSS → FVG)
+# Sniper Logic
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -173,7 +164,6 @@ def detect_swing_points(candles, lookback=3):
                 candles[i]["low"] < min(c["low"] for c in candles[i+1:i+lookback+1])):
             lows.append(i)
     return highs, lows
-
 
 def detect_liquidity_sweep(candles, swing_highs, swing_lows):
     sweeps = []
@@ -193,7 +183,6 @@ def detect_liquidity_sweep(candles, swing_highs, swing_lows):
                 break
     return sweeps
 
-
 def detect_mss(candles, lookback=3):
     if len(candles) < lookback + 2:
         return None
@@ -207,7 +196,6 @@ def detect_mss(candles, lookback=3):
         return "BEARISH"
     return None
 
-
 def detect_fvg(candles):
     if len(candles) < 3:
         return None
@@ -217,7 +205,6 @@ def detect_fvg(candles):
     elif c1["low"] > c3["high"]:
         return {"type": "bearish", "zone_low": round(c3["high"], 2), "zone_high": round(c1["low"], 2)}
     return None
-
 
 def run_sniper_analysis():
     raw15 = sdk_get_candles("XAUUSD", "15m", 500)
@@ -261,29 +248,23 @@ def run_sniper_analysis():
     signal = "HOLD"
     entry_zone = sl_val = tp_val = None
 
-    # ── Aligned MSS+FVG → refined entry ──
+    # Priority 1: aligned MSS+FVG
     if latest_sweep["type"] == "sell_side" and mss == "BULLISH" and fvg and fvg["type"] == "bullish":
         signal = "BUY"
         entry_zone = (fvg["zone_low"], fvg["zone_high"])
         sl_val = latest_sweep["level"]
         tp_val = round(fvg["zone_high"] + (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
-
     elif latest_sweep["type"] == "buy_side" and mss == "BEARISH" and fvg and fvg["type"] == "bearish":
         signal = "SELL"
         entry_zone = (fvg["zone_low"], fvg["zone_high"])
         sl_val = latest_sweep["level"]
         tp_val = round(fvg["zone_low"] - (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
-
-    # ── Sweep exists but MSS/FVG missing → aggressive entry based on sweep ──
     else:
+        # Fallback: sweep-based aggression
         sweep_level = latest_sweep["level"]
-        if sweep_level is None or pd.isna(sweep_level) or sweep_level <= 0:
-            # cannot place order without valid level
-            pass
-        else:
+        if sweep_level is not None and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
             if latest_sweep["type"] == "sell_side":
                 signal = "BUY"
-                # Entry = current price, SL = sweep level, TP = 2x risk distance
                 risk_dist = abs(current_price - sweep_level)
                 sl_val = sweep_level
                 tp_val = round(current_price + 2 * risk_dist, 2)
@@ -320,7 +301,6 @@ def check_open_trades():
                 current_price = raw[-1]["close"]
             else:
                 current_price = sdk_get_price("XAUUSD")
-
             if current_price is None:
                 _time.sleep(30)
                 continue
@@ -329,10 +309,8 @@ def check_open_trades():
             trades = con.execute(
                 "SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL"
             ).fetchall()
-
             for tid, pair, sig, entry, sl, tp in trades:
-                if entry is None:
-                    continue
+                if entry is None: continue
                 outcome = pnl = None
                 if sig == "BUY":
                     if current_price <= sl:
@@ -344,7 +322,6 @@ def check_open_trades():
                         outcome, pnl = "LOSS", round((entry - sl) * 100, 2)
                     elif current_price <= tp:
                         outcome, pnl = "WIN",  round((entry - tp) * 100, 2)
-
                 if outcome:
                     con.execute(
                         "UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?",
@@ -355,7 +332,6 @@ def check_open_trades():
         except Exception as e:
             print(f"Checker error: {e}")
         _time.sleep(30)
-
 
 # ============================================================
 # Stub Agents
@@ -377,7 +353,6 @@ class GeminiAnalyst:
     def analyze(self, *args):
         return {"summary": "Gemini throttled"}
 
-
 # ============================================================
 # Init
 # ============================================================
@@ -390,7 +365,6 @@ strategy_selector = StrategySelector(config)
 gemini_analyst    = GeminiAnalyst(GEMINI_API_KEY)
 
 DB_PATH = "journal.db"
-
 def init_db():
     con = sqlite3.connect(DB_PATH)
     con.executescript("""
@@ -418,10 +392,8 @@ def init_db():
     """)
     con.commit()
     con.close()
-
 init_db()
 threading.Thread(target=check_open_trades, daemon=True).start()
-
 
 # ============================================================
 # Routes
@@ -430,7 +402,6 @@ threading.Thread(target=check_open_trades, daemon=True).start()
 def dashboard():
     return FileResponse("dashboard.html")
 
-
 @app.get("/test-metaapi")
 def test_metaapi():
     raw = sdk_get_candles("XAUUSD", "1m", 5)
@@ -438,11 +409,10 @@ def test_metaapi():
         price = sdk_get_price("XAUUSD")
         return {
             "status":  "candles_failed",
-            "message": "get_historical_candles failed. Check account type in metaapi.cloud dashboard.",
+            "message": "get_historical_candles failed.",
             "rpc_live_price": price
         }
     return {"status": "ok", "sample_candles": raw[-3:], "total_fetched": len(raw)}
-
 
 @app.get("/test-price")
 def test_price():
@@ -450,7 +420,6 @@ def test_price():
     if price is None:
         return {"status": "error", "message": "RPC price fetch failed."}
     return {"status": "ok", "XAUUSD": round(price, 2)}
-
 
 @app.get("/master-signal")
 def master_signal():
@@ -484,7 +453,6 @@ def master_signal():
         entry      = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry": round(entry, 2), "sl": sniper["sl"], "tp": sniper["tp"]}
 
-        # ── Journal entry ──────────────────────────
         con = sqlite3.connect(DB_PATH)
         con.execute(
             "INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
@@ -495,7 +463,7 @@ def master_signal():
         con.commit()
         con.close()
 
-        # ── LIVE ORDER EXECUTION ──────────────────
+        # Execute live order (no comment)
         order_result = execute_trade_sync(
             signal=decision,
             sl=risk_brief["sl"],
@@ -532,7 +500,6 @@ def master_signal():
         "current_price":  sniper["current_price"],
     }
 
-
 @app.get("/agent-log")
 def agent_log():
     con  = sqlite3.connect(DB_PATH)
@@ -542,7 +509,6 @@ def agent_log():
     ).fetchall()
     con.close()
     return [{"hour": r[0], "agent": r[1], "action": r[2], "prob": r[3], "details": r[4]} for r in rows]
-
 
 @app.get("/today-trades")
 def today_trades():
@@ -557,7 +523,6 @@ def today_trades():
          "entry": r[3], "sl": r[4], "tp": r[5], "outcome": r[6], "pnl": r[7]}
         for r in rows
     ]
-
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
