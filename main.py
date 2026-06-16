@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI Sniper OS (Complete + Tested)
+# main.py – Tradevil AGI OS (XAUUSD Spot Sniper + Paper Trading)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -16,15 +16,15 @@ config["gemini_api_key"] = GEMINI_API_KEY
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ========== Sniper Logic (All in one) ==========
+# ========== Sniper Logic (XAUUSD Spot Only) ==========
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
     for i in range(lookback, len(candles) - lookback):
-        if candles[i]["high"] > max(c["high"] for c in candles[i-lookback:i]) and \
-           candles[i]["high"] > max(c["high"] for c in candles[i+1:i+lookback+1]):
+        if (candles[i]["high"] > max(c["high"] for c in candles[i-lookback:i]) and
+            candles[i]["high"] > max(c["high"] for c in candles[i+1:i+lookback+1])):
             highs.append(i)
-        if candles[i]["low"] < min(c["low"] for c in candles[i-lookback:i]) and \
-           candles[i]["low"] < min(c["low"] for c in candles[i+1:i+lookback+1]):
+        if (candles[i]["low"] < min(c["low"] for c in candles[i-lookback:i]) and
+            candles[i]["low"] < min(c["low"] for c in candles[i+1:i+lookback+1])):
             lows.append(i)
     return highs, lows
 
@@ -34,11 +34,11 @@ def detect_liquidity_sweep(candles, swing_highs, swing_lows):
         c = candles[i]
         for sl_idx in swing_lows:
             if sl_idx < i and c["low"] < candles[sl_idx]["low"] and c["close"] > candles[sl_idx]["low"]:
-                sweeps.append({"type":"sell_side","index":i,"level":candles[sl_idx]["low"]})
+                sweeps.append({"type":"sell_side","index":i,"level":round(candles[sl_idx]["low"],2)})
                 break
         for sh_idx in swing_highs:
             if sh_idx < i and c["high"] > candles[sh_idx]["high"] and c["close"] < candles[sh_idx]["high"]:
-                sweeps.append({"type":"buy_side","index":i,"level":candles[sh_idx]["high"]})
+                sweeps.append({"type":"buy_side","index":i,"level":round(candles[sh_idx]["high"],2)})
                 break
     return sweeps
 
@@ -60,45 +60,28 @@ def detect_fvg(candles):
         return None
     c1, c2, c3 = candles[-3], candles[-2], candles[-1]
     if c1["high"] < c3["low"]:
-        return {"type":"bullish","zone_low":c1["high"],"zone_high":c3["low"]}
+        return {"type":"bullish","zone_low":round(c1["high"],2),"zone_high":round(c3["low"],2)}
     elif c1["low"] > c3["high"]:
-        return {"type":"bearish","zone_low":c3["high"],"zone_high":c1["low"]}
+        return {"type":"bearish","zone_low":round(c3["high"],2),"zone_high":round(c1["low"],2)}
     return None
 
-def run_sniper_analysis(pair="XAUUSD"):
-    # Reliable tickers for gold
-    if pair == "XAUUSD":
-        tickers = ["GC=F", "XAUUSD=X"]  # GC=F is COMEX futures, always available
-    else:
-        tickers = [pair + "=X"]
+def run_sniper_analysis():
+    """Fetch live XAUUSD spot data and run strict ICT sniper analysis."""
+    try:
+        # Fetch 15m and 1m data (use period that covers weekend gaps)
+        df15 = yf.Ticker("XAUUSD=X").history(period="5d", interval="15m")
+        df1  = yf.Ticker("XAUUSD=X").history(period="5d", interval="1m")
+    except Exception as e:
+        return empty_result("Data fetch error")
 
-    df15 = df1 = None
-    for tkr in tickers:
-        try:
-            df15 = yf.Ticker(tkr).history(period="5d", interval="15m")
-            df1  = yf.Ticker(tkr).history(period="5d", interval="1m")
-            if not df15.empty and len(df15) >= 50 and not df1.empty and len(df1) >= 10:
-                break  # success
-        except:
-            continue
+    if df15.empty or len(df15) < 50 or df1.empty or len(df1) < 10:
+        return empty_result("Insufficient data (market may be closed)")
 
-    if df15 is None or df15.empty or len(df15) < 50 or df1 is None or df1.empty or len(df1) < 10:
-        # Ultimate fallback: minimal valid result
-        return {
-            "signal": "HOLD",
-            "entry_zone": None, "sl": None, "tp": None,
-            "trend": "Unknown", "sweep_detected": False,
-            "sweep_type": None, "sweep_level": None,
-            "mss": None, "fvg": None,
-            "current_price": 0
-        }
-
-    # Convert to candle dicts
     candles15 = [{"high": float(r.High), "low": float(r.Low), "close": float(r.Close)} for r in df15.itertuples()]
     candles1  = [{"high": float(r.High), "low": float(r.Low), "close": float(r.Close)} for r in df1.itertuples()]
     current_price = candles1[-1]["close"]
 
-    # Market Trend (15m)
+    # Market Trend (15m SMA slope)
     sma15 = df15["Close"].rolling(50).mean()
     if len(sma15) >= 2:
         slope = sma15.iloc[-1] - sma15.iloc[-2]
@@ -106,86 +89,113 @@ def run_sniper_analysis(pair="XAUUSD"):
     else:
         trend = "Unknown"
 
-    # 15m Sweeps
-    sh15, sl15 = detect_swing_points(candles15, 3)
-    sweeps15 = detect_liquidity_sweep(candles15, sh15, sl15)
-    latest_sweep = sweeps15[-1] if sweeps15 else None
+    # 15m Swing points & Sweeps
+    sh, sl = detect_swing_points(candles15, 3)
+    sweeps = detect_liquidity_sweep(candles15, sh, sl)
+    latest_sweep = sweeps[-1] if sweeps else None
 
+    if not latest_sweep:
+        return {
+            "signal": "HOLD",
+            "entry_zone": None, "sl": None, "tp": None,
+            "trend": trend, "sweep_detected": False,
+            "sweep_type": None, "sweep_level": None,
+            "mss": None, "fvg": None,
+            "current_price": current_price
+        }
+
+    # 1m confirmation (MSS + FVG)
+    mss = detect_mss(candles1, 3)
+    fvg = detect_fvg(candles1)
+
+    # Strict entry logic
     signal = "HOLD"
     entry_zone = None
-    sl = None
-    tp = None
-    mss = None
-    fvg = None
+    sl_val = None
+    tp_val = None
 
-    if latest_sweep:
-        mss = detect_mss(candles1, 3)
-        fvg = detect_fvg(candles1)
-
-        # Direction from sweep
-        if latest_sweep["type"] == "sell_side":
-            direction = "BUY"
-            base_sl = latest_sweep["level"]
-        else:
-            direction = "SELL"
-            base_sl = latest_sweep["level"]
-
-        # Refined entry if MSS and FVG align
-        if direction == "BUY" and mss == "BULLISH" and fvg and fvg["type"] == "bullish":
-            entry_zone = (fvg["zone_low"], fvg["zone_high"])
-            sl = latest_sweep["level"]
-            tp = fvg["zone_high"] + (fvg["zone_high"] - fvg["zone_low"]) * 2
-            signal = "BUY"
-        elif direction == "SELL" and mss == "BEARISH" and fvg and fvg["type"] == "bearish":
-            entry_zone = (fvg["zone_low"], fvg["zone_high"])
-            sl = latest_sweep["level"]
-            tp = fvg["zone_low"] - (fvg["zone_high"] - fvg["zone_low"]) * 2
-            signal = "SELL"
-        else:
-            # Sweep present but no perfect MSS/FVG → trade with wider zone
-            signal = direction
-            atr = (df1["High"].iloc[-14:].max() - df1["Low"].iloc[-14:].min()) or 2.0
-            if direction == "BUY":
-                entry_zone = (current_price, current_price + atr * 0.5)
-                sl = latest_sweep["level"]
-                tp = current_price + (current_price - latest_sweep["level"]) * 2
-            else:
-                entry_zone = (current_price - atr * 0.5, current_price)
-                sl = latest_sweep["level"]
-                tp = current_price - (latest_sweep["level"] - current_price) * 2
-
-    # If still HOLD, fallback to simple 1m trend
-    if signal == "HOLD":
-        sma1 = df1["Close"].rolling(50).mean()
-        if len(sma1) >= 2:
-            slope1 = sma1.iloc[-1] - sma1.iloc[-2]
-            atr = (df1["High"].iloc[-14:].max() - df1["Low"].iloc[-14:].min()) or 2.0
-            if slope1 > 0:
-                signal = "BUY"
-                sl = current_price - atr * 1.5
-                tp = current_price + atr * 2
-                entry_zone = (current_price, current_price)
-            elif slope1 < 0:
-                signal = "SELL"
-                sl = current_price + atr * 1.5
-                tp = current_price - atr * 2
-                entry_zone = (current_price, current_price)
+    if latest_sweep["type"] == "sell_side" and mss == "BULLISH" and fvg and fvg["type"] == "bullish":
+        signal = "BUY"
+        entry_zone = (fvg["zone_low"], fvg["zone_high"])
+        sl_val = latest_sweep["level"]
+        tp_val = round(fvg["zone_high"] + (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
+    elif latest_sweep["type"] == "buy_side" and mss == "BEARISH" and fvg and fvg["type"] == "bearish":
+        signal = "SELL"
+        entry_zone = (fvg["zone_low"], fvg["zone_high"])
+        sl_val = latest_sweep["level"]
+        tp_val = round(fvg["zone_low"] - (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
 
     return {
         "signal": signal,
         "entry_zone": entry_zone,
-        "sl": round(sl, 2) if sl else None,
-        "tp": round(tp, 2) if tp else None,
+        "sl": sl_val,
+        "tp": tp_val,
         "trend": trend,
-        "sweep_detected": bool(latest_sweep),
-        "sweep_type": latest_sweep["type"] if latest_sweep else None,
-        "sweep_level": latest_sweep["level"] if latest_sweep else None,
+        "sweep_detected": True,
+        "sweep_type": latest_sweep["type"],
+        "sweep_level": latest_sweep["level"],
         "mss": mss,
         "fvg": fvg,
         "current_price": current_price
     }
 
-# ========== Other Agents (simplified) ==========
+def empty_result(msg="", trend="Unknown", price=0):
+    return {
+        "signal": "HOLD",
+        "entry_zone": None, "sl": None, "tp": None,
+        "trend": trend, "sweep_detected": False,
+        "sweep_type": None, "sweep_level": None,
+        "mss": None, "fvg": None,
+        "current_price": price
+    }
+
+# ========== Paper Trading Engine ==========
+def check_open_trades():
+    while True:
+        try:
+            con = sqlite3.connect(DB_PATH)
+            trades = con.execute(
+                "SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL"
+            ).fetchall()
+            for tid, pair, sig, entry, sl, tp in trades:
+                if entry is None:
+                    continue
+                # Get live XAUUSD spot price
+                try:
+                    df = yf.Ticker("XAUUSD=X").history(period="1d", interval="1m")
+                    if df.empty:
+                        continue
+                    current = df["Close"].iloc[-1]
+                except:
+                    continue
+
+                outcome = None
+                pnl = None
+                if sig == "BUY":
+                    if current <= sl:
+                        outcome = "LOSS"
+                        pnl = round((sl - entry) * 100, 2)
+                    elif current >= tp:
+                        outcome = "WIN"
+                        pnl = round((tp - entry) * 100, 2)
+                else:  # SELL
+                    if current >= sl:
+                        outcome = "LOSS"
+                        pnl = round((entry - sl) * 100, 2)
+                    elif current <= tp:
+                        outcome = "WIN"
+                        pnl = round((entry - tp) * 100, 2)
+
+                if outcome:
+                    con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?",
+                                (outcome, pnl, tid))
+                    con.commit()
+            con.close()
+        except Exception as e:
+            print(f"Paper trade checker: {e}")
+        _time.sleep(15)  # check every 15 seconds
+
+# ---------- Agents (simplified) ----------
 def run_news_analysis():
     return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
@@ -197,35 +207,17 @@ class StrategySelector:
     def __init__(self, config): pass
     def select(self, pair, mtf):
         return {"name":"default", "prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
-    def get_all(self): return []
-    def promote(self, s): pass
 
 class GeminiAnalyst:
-    def __init__(self, key):
-        self.available = bool(key)
-    def analyze(self, tech, news, mtf, stats):
-        if not self.available:
-            return {"summary":"Gemini unavailable"}
-        return {"summary":"Gemini throttled (quota saver)"}
-
-class BacktestEngine:
-    def run(self, pair, strats): return {"name":"default"}
-
-class DailyRiskTracker:
-    def __init__(self, cfg): self.pnl = 0.0
-    def check_reset(self): pass
-    def stats(self): return {"daily_pnl": self.pnl}
-    def update_balance(self, pnl): self.pnl += pnl
-
-def analyze_mtf(pair):
-    return {"htf_bias":"Bullish","confluence_score":6}
+    def __init__(self, key): pass
+    def analyze(self, *args):
+        return {"summary": "Gemini throttled (quota saver)"}
 
 # ---------- Initialize ----------
-daily_tracker = DailyRiskTracker(config)
+daily_tracker = type('',(object,),{"check_reset":lambda self:None,"stats":lambda self:{"daily_pnl":0}})()
 risk_manager = RiskManager()
 strategy_selector = StrategySelector(config)
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
-backtest_engine = BacktestEngine()
 
 DB_PATH = "journal.db"
 def init_db():
@@ -245,41 +237,25 @@ def init_db():
     con.close()
 init_db()
 
-current_pair = config["default_pair"]
-_last_gemini_call = None
+# Start paper trade checker thread
+threading.Thread(target=check_open_trades, daemon=True).start()
 
 # ---------- Routes ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
 
-@app.post("/set-pair")
-def set_pair(pair: str):
-    global current_pair
-    if pair in config["pairs"]:
-        current_pair = pair
-        return {"status":"ok","current_pair":pair}
-    raise HTTPException(400, "Invalid pair")
-
 @app.get("/master-signal")
 def master_signal():
-    global _last_gemini_call
-    daily_tracker.check_reset()
-
-    sniper = run_sniper_analysis(current_pair)
+    sniper = run_sniper_analysis()
     news = run_news_analysis()
-    mtf = analyze_mtf(current_pair)
+    mtf = {"htf_bias":"Bullish","confluence_score":6}
     risk_eval = risk_manager.evaluate()
-    strategy = strategy_selector.select(current_pair, mtf)
+    strategy = strategy_selector.select("XAUUSD", mtf)
 
     now = datetime.datetime.utcnow()
-    if sniper["signal"] in ("BUY","SELL") and (_last_gemini_call is None or (now - _last_gemini_call).seconds > 3600):
-        gemini_advice = gemini_analyst.analyze(sniper, news, mtf, daily_tracker.stats())
-        _last_gemini_call = now
-    else:
-        gemini_advice = {"summary":"Gemini throttled (quota saver)","recommended_action":sniper["signal"],"confidence":0.5}
+    gemini_advice = {"summary":"Gemini throttled (quota saver)"}
 
-    # Sniper-based probabilities
     if sniper["signal"] == "BUY":
         tech_probs = {"BUY":0.9, "SELL":0.0, "HOLD":0.1}
     elif sniper["signal"] == "SELL":
@@ -287,11 +263,11 @@ def master_signal():
     else:
         tech_probs = {"BUY":0.3, "SELL":0.3, "HOLD":0.4}
 
-    news_probs = {"BUY": news["prob_buy"], "SELL": news["prob_sell"], "HOLD": news["prob_hold"]}
-    risk_probs = {"BUY": risk_eval["prob_buy"], "SELL": risk_eval["prob_sell"], "HOLD": risk_eval["prob_hold"]}
-    strat_probs = {"BUY": strategy["prob_buy"], "SELL": strategy["prob_sell"], "HOLD": strategy["prob_hold"]}
+    news_probs = {"BUY":0.5, "SELL":0.5, "HOLD":0.0}
+    risk_probs = {"BUY":0.33, "SELL":0.33, "HOLD":0.34}
+    strat_probs = {"BUY":0.5, "SELL":0.5, "HOLD":0.0}
 
-    w = config["parameters"]["agent_weights"]
+    w = {"tech":0.4,"news":0.2,"risk":0.2,"strategy":0.2}
     final_probs = {
         "BUY": tech_probs["BUY"]*w["tech"] + news_probs["BUY"]*w["news"] + risk_probs["BUY"]*w["risk"] + strat_probs["BUY"]*w["strategy"],
         "SELL": tech_probs["SELL"]*w["tech"] + news_probs["SELL"]*w["news"] + risk_probs["SELL"]*w["risk"] + strat_probs["SELL"]*w["strategy"],
@@ -299,17 +275,15 @@ def master_signal():
     }
     decision = max(final_probs, key=final_probs.get)
 
-    # Risk brief
     risk_brief = None
-    if decision in ("BUY","SELL") and sniper.get("entry_zone") and sniper.get("sl") and sniper.get("tp"):
+    if decision in ("BUY","SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
         entry = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
 
-    # Log trade only if actionable
-    if decision in ("BUY","SELL") and risk_brief:
+        # Log trade
         con = sqlite3.connect(DB_PATH)
         con.execute("INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
-                    (now.isoformat(), current_pair, decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strategy["name"], gemini_advice.get("summary","")))
+                    (now.isoformat(), "XAUUSD", decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strategy["name"], gemini_advice.get("summary","")))
         con.commit()
         con.close()
 
@@ -350,20 +324,6 @@ def today_trades():
     rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
     con.close()
     return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7]} for r in rows]
-
-# Optional: test endpoint
-@app.get("/test-sniper")
-def test_sniper():
-    return run_sniper_analysis(current_pair)
-
-# Scheduler (placeholder)
-import schedule
-def scheduler_thread():
-    schedule.every().sunday.at("00:00").do(lambda: print("Weekly optimise placeholder"))
-    while True:
-        schedule.run_pending()
-        _time.sleep(3600)
-threading.Thread(target=scheduler_thread, daemon=True).start()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT",8000)))
