@@ -1,194 +1,83 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tradevil AGI Dashboard</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 20px; }
-        h1 { color: #58a6ff; }
-        .controls { margin: 10px 0; }
-        select, button { padding: 8px 14px; margin-right: 8px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; cursor: pointer; }
-        button:hover { background: #30363d; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-top: 20px; }
-        .card { background: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
-        h3 { color: #d4af37; margin-bottom: 10px; }
-        .value { font-size: 16px; word-break: break-word; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 8px; border: 1px solid #30363d; text-align: center; font-size: 14px; }
-        th { background: #21262d; }
-        .profit { color: #3fb950; }
-        .loss { color: #f85149; }
-        .signal-buy { color: #3fb950; font-weight: bold; }
-        .signal-sell { color: #f85149; font-weight: bold; }
-        .signal-hold { color: #d4af37; font-weight: bold; }
-        .agent-log { max-height: 300px; overflow-y: auto; }
-        .agent-item { padding: 5px 0; border-bottom: 1px solid #30363d; }
-        .small { font-size: 13px; color: #8b949e; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tradevil AGI Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0} body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,sans-serif;padding:20px}
+h1{color:#58a6ff} .controls{margin:10px 0} select,button{padding:8px 14px;margin-right:8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:15px;margin-top:20px}
+.card{background:#161b22;padding:15px;border-radius:10px;border:1px solid #30363d}
+h3{color:#d4af37;margin-bottom:10px} .value{font-size:16px}
+table{width:100%;border-collapse:collapse;margin-top:10px} th,td{padding:8px;border:1px solid #30363d;text-align:center;font-size:14px}
+th{background:#21262d} .profit{color:#3fb950} .loss{color:#f85149} .signal-buy{color:#3fb950;font-weight:bold} .signal-sell{color:#f85149;font-weight:bold} .signal-hold{color:#d4af37;font-weight:bold}
+.agent-log{max-height:300px;overflow-y:auto} .agent-item{padding:5px 0;border-bottom:1px solid #30363d} .small{font-size:13px;color:#8b949e}
+</style>
 </head>
 <body>
-    <h1>🤖 Tradevil AGI OS – Sniper Dashboard</h1>
-    <div class="controls">
-        <select id="pairSelect">
-            <option>XAUUSD</option>
-            <option>EURUSD</option>
-            <option>BTCUSD</option>
-        </select>
-        <button onclick="setPair()">Set Pair</button>
-        <button onclick="fetchAll()">Force Refresh</button>
-        <span id="lastUpdate" class="small"></span>
-    </div>
+<h1>🤖 Tradevil AGI – Sniper OS</h1>
+<div class="controls">
+<select id="pairSelect"><option>XAUUSD</option><option>EURUSD</option><option>BTCUSD</option></select>
+<button onclick="setPair()">Set Pair</button>
+<button onclick="fetchAll()">Force Refresh</button>
+<span id="lastUpdate" class="small"></span>
+</div>
 
-    <!-- Main Status Cards -->
-    <div class="grid">
-        <div class="card">
-            <h3>💰 Current Price</h3>
-            <div id="currentPrice" class="value">--</div>
-        </div>
-        <div class="card">
-            <h3>📈 Market Trend</h3>
-            <div id="marketTrend" class="value">--</div>
-        </div>
-        <div class="card">
-            <h3>🔄 15m Sweep</h3>
-            <div id="sweepInfo" class="value">--</div>
-        </div>
-        <div class="card">
-            <h3>⚡ MSS (1m)</h3>
-            <div id="mssInfo" class="value">--</div>
-        </div>
-        <div class="card">
-            <h3>📉 FVG (1m)</h3>
-            <div id="fvgInfo" class="value">--</div>
-        </div>
-    </div>
+<div class="grid">
+<div class="card"><h3>💰 Price</h3><div id="currentPrice" class="value">--</div></div>
+<div class="card"><h3>📈 Market Trend</h3><div id="marketTrend" class="value">--</div></div>
+<div class="card"><h3>🔄 Sweep (15m)</h3><div id="sweepInfo" class="value">--</div></div>
+<div class="card"><h3>⚡ MSS (1m)</h3><div id="mssInfo" class="value">--</div></div>
+<div class="card"><h3>📉 FVG (1m)</h3><div id="fvgInfo" class="value">--</div></div>
+</div>
 
-    <!-- Decision & Risk Brief -->
-    <div class="grid" style="margin-top:15px">
-        <div class="card">
-            <h3>🧠 Main Decision</h3>
-            <div id="decisionDiv" class="value">--</div>
-            <div id="probabilities" class="small" style="margin-top:5px;"></div>
-        </div>
-        <div class="card">
-            <h3>📊 Risk Brief</h3>
-            <div id="riskBrief" class="value">--</div>
-        </div>
-        <div class="card">
-            <h3>🤖 Gemini AI</h3>
-            <div id="geminiAdvice" class="value">--</div>
-        </div>
-    </div>
+<div class="grid" style="margin-top:15px">
+<div class="card"><h3>🧠 Main Decision</h3><div id="decisionDiv" class="value">--</div><div id="probabilities" class="small"></div></div>
+<div class="card"><h3>📊 Risk Brief</h3><div id="riskBrief" class="value">--</div></div>
+<div class="card"><h3>🤖 Gemini AI</h3><div id="geminiAdvice" class="value">--</div></div>
+</div>
 
-    <!-- Agent Activity Logs -->
-    <div class="card" style="margin-top:20px">
-        <h3>🧩 Agent Activity (last hour)</h3>
-        <div id="agentLogContainer" class="agent-log">--</div>
-    </div>
+<div class="card" style="margin-top:20px"><h3>🧩 Agent Activity (last hour)</h3><div id="agentLogContainer" class="agent-log">--</div></div>
+<div class="card" style="margin-top:20px"><h3>📈 Today's Trades</h3><div id="tradesTable">--</div></div>
 
-    <!-- Today's Trades -->
-    <div class="card" style="margin-top:20px">
-        <h3>📈 Today's Trades</h3>
-        <div id="tradesTable">--</div>
-    </div>
+<script>
+let currentPair='XAUUSD';
+async function setPair(){currentPair=document.getElementById('pairSelect').value;await fetch('/set-pair?pair='+currentPair,{method:'POST'});fetchAll()}
+async function fetchAll(){
+ try{
+  const r=await fetch('/master-signal'); const d=await r.json();
+  document.getElementById('currentPrice').innerText=d.current_price?'$'+d.current_price.toFixed(2):'--';
+  document.getElementById('marketTrend').innerText=d.market_trend||'--';
+  document.getElementById('sweepInfo').innerHTML=d.sweep_detected?`${d.sweep_type} @ ${d.sweep_level?.toFixed(2)}`:'No sweep';
+  document.getElementById('mssInfo').innerText=d.mss||'None';
+  document.getElementById('fvgInfo').innerHTML=d.fvg?`${d.fvg.type} (${d.fvg.zone_low?.toFixed(2)}-${d.fvg.zone_high?.toFixed(2)})`:'None';
 
-    <script>
-        let currentPair = 'XAUUSD';
+  let cls='signal-hold'; if(d.decision==='BUY')cls='signal-buy'; else if(d.decision==='SELL')cls='signal-sell';
+  document.getElementById('decisionDiv').innerHTML=`<span class="${cls}">${d.decision}</span>`;
+  document.getElementById('probabilities').innerText=`BUY:${(d.probabilities.BUY*100).toFixed(1)}% SELL:${(d.probabilities.SELL*100).toFixed(1)}% HOLD:${(d.probabilities.HOLD*100).toFixed(1)}%`;
 
-        async function setPair() {
-            currentPair = document.getElementById('pairSelect').value;
-            await fetch('/set-pair?pair=' + currentPair, { method: 'POST' });
-            fetchAll();
-        }
+  if(d.risk_brief) document.getElementById('riskBrief').innerHTML=`Entry:$${d.risk_brief.entry}<br>SL:$${d.risk_brief.sl}<br>TP:$${d.risk_brief.tp}`;
+  else document.getElementById('riskBrief').innerText='No trade';
 
-        async function fetchAll() {
-            try {
-                // 1. Master Signal
-                const signalRes = await fetch('/master-signal');
-                const d = await signalRes.json();
+  document.getElementById('geminiAdvice').innerText=d.gemini_advice?.summary||'Unavailable';
 
-                // Current price & market info
-                document.getElementById('currentPrice').innerHTML = d.current_price ? '$' + d.current_price.toFixed(2) : 'N/A';
-                document.getElementById('marketTrend').innerHTML = d.market_trend || 'N/A';
-                document.getElementById('sweepInfo').innerHTML = d.sweep_detected ?
-                    `${d.sweep_type} at ${d.sweep_level?.toFixed(2)}` : 'No sweep';
-                document.getElementById('mssInfo').innerHTML = d.mss || 'None';
-                if (d.fvg) {
-                    document.getElementById('fvgInfo').innerHTML = `${d.fvg.type} (${d.fvg.zone_low?.toFixed(2)} - ${d.fvg.zone_high?.toFixed(2)})`;
-                } else {
-                    document.getElementById('fvgInfo').innerHTML = 'None';
-                }
+  const logRes=await fetch('/agent-log'); const logs=await logRes.json();
+  let logHtml=''; logs.forEach(l=>{logHtml+=`<div class="agent-item"><strong>${l.agent}</strong> | ${l.action} | ${(l.prob*100).toFixed(0)}% <span class="small">${l.hour}</span></div>`});
+  document.getElementById('agentLogContainer').innerHTML=logHtml||'No logs';
 
-                // Decision & probabilities
-                let decisionClass = 'signal-hold';
-                if (d.decision === 'BUY') decisionClass = 'signal-buy';
-                else if (d.decision === 'SELL') decisionClass = 'signal-sell';
-                document.getElementById('decisionDiv').innerHTML = `<span class="${decisionClass}">${d.decision}</span>`;
-                document.getElementById('probabilities').innerText = `BUY: ${(d.probabilities.BUY*100).toFixed(1)}% | SELL: ${(d.probabilities.SELL*100).toFixed(1)}% | HOLD: ${(d.probabilities.HOLD*100).toFixed(1)}%`;
-
-                // Risk Brief
-                if (d.risk_brief) {
-                    document.getElementById('riskBrief').innerHTML = `Entry: $${d.risk_brief.entry}<br>SL: $${d.risk_brief.sl}<br>TP: $${d.risk_brief.tp}`;
-                } else {
-                    document.getElementById('riskBrief').innerHTML = 'No trade';
-                }
-
-                // Gemini Advice
-                document.getElementById('geminiAdvice').innerHTML = d.gemini_advice?.summary || 'Unavailable';
-
-                // 2. Agent Logs
-                const logRes = await fetch('/agent-log');
-                const logs = await logRes.json();
-                let logHtml = '';
-                if (logs.length > 0) {
-                    logs.forEach(l => {
-                        logHtml += `<div class="agent-item"><strong>${l.agent}</strong> | Action: ${l.action} | Prob: ${(l.prob*100).toFixed(0)}% <span class="small">${l.hour}</span></div>`;
-                    });
-                } else {
-                    logHtml = 'No agent logs yet.';
-                }
-                document.getElementById('agentLogContainer').innerHTML = logHtml;
-
-                // 3. Today's Trades
-                const tradesRes = await fetch('/today-trades');
-                const trades = await tradesRes.json();
-                let tradesHtml = '';
-                if (trades.length > 0) {
-                    tradesHtml = `<table>
-                        <thead><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th></tr></thead>
-                        <tbody>`;
-                    trades.forEach(t => {
-                        let pnlClass = (t.pnl > 0) ? 'profit' : ((t.pnl < 0) ? 'loss' : '');
-                        tradesHtml += `<tr>
-                            <td class="small">${t.timestamp ? t.timestamp.substr(11, 8) : ''}</td>
-                            <td>${t.pair}</td>
-                            <td>${t.signal}</td>
-                            <td>${t.entry ? '$' + t.entry : ''}</td>
-                            <td>${t.sl ? '$' + t.sl : ''}</td>
-                            <td>${t.tp ? '$' + t.tp : ''}</td>
-                            <td>${t.outcome || 'pending'}</td>
-                            <td class="${pnlClass}">${t.pnl ? '$' + t.pnl.toFixed(2) : ''}</td>
-                        </tr>`;
-                    });
-                    tradesHtml += '</tbody></table>';
-                } else {
-                    tradesHtml = 'No trades executed today.';
-                }
-                document.getElementById('tradesTable').innerHTML = tradesHtml;
-
-                // Update timestamp
-                document.getElementById('lastUpdate').innerText = 'Last updated: ' + new Date().toLocaleTimeString();
-            } catch (err) {
-                console.error(err);
-                alert('Error fetching data: ' + err.message);
-            }
-        }
-
-        // Initial fetch and auto-refresh every 30 seconds
-        fetchAll();
-        setInterval(fetchAll, 30000);
-    </script>
+  const tradesRes=await fetch('/today-trades'); const trades=await tradesRes.json();
+  let table='<table><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th></tr>';
+  trades.forEach(t=>{
+   let pnlClass=(t.pnl>0)?'profit':(t.pnl<0)?'loss':'';
+   table+=`<tr><td class="small">${t.timestamp?t.timestamp.substr(11,8):''}</td><td>${t.pair}</td><td>${t.signal}</td><td>${t.entry?'$'+t.entry:''}</td><td>${t.sl?'$'+t.sl:''}</td><td>${t.tp?'$'+t.tp:''}</td><td>${t.outcome||'pending'}</td><td class="${pnlClass}">${t.pnl?'$'+t.pnl.toFixed(2):''}</td></tr>`;
+  });
+  table+='</table>';
+  document.getElementById('tradesTable').innerHTML=trades.length?table:'No trades today';
+  document.getElementById('lastUpdate').innerText='Last updated: '+new Date().toLocaleTimeString();
+ }catch(e){console.error(e)}
+}
+fetchAll(); setInterval(fetchAll,30000);
+</script>
 </body>
 </html>
