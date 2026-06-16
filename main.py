@@ -1,4 +1,8 @@
-# main.py – Tradevil AGI OS (MetaApi SDK v29 – CORRECT: account.get_historical_candles)
+# main.py – Tradevil AGI OS
+# MetaApi SDK v29 – VERIFIED from official docs
+# Uses: account.get_historical_candles() with datetime start_time (G1 accounts)
+# Fallback: RPC connection get_symbol_price for live price (all accounts)
+
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -24,9 +28,10 @@ app.add_middleware(
 )
 
 # ============================================================
-#  MetaApi SDK v29 – VERIFIED CORRECT METHOD
-#  account.get_historical_candles(symbol, timeframe, start_time, limit)
-#  Direct on account object — no sub-connection needed
+#  VERIFIED MetaApi SDK v29 candle fetch
+#  Official docs: account.get_historical_candles(symbol, timeframe, start_time, limit)
+#  start_time must be datetime object (not None, not string)
+#  NOTE: Only works on G1 accounts. G2 accounts → returns None
 # ============================================================
 def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
@@ -38,20 +43,29 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
         try:
             account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
 
-            # Deploy if needed
             if account.state not in ('DEPLOYING', 'DEPLOYED'):
                 await account.deploy()
             await account.wait_connected()
 
-            # ✅ CORRECT v29 method: directly on account object
-            # start_time=None → fetches latest candles
+            # start_time = now (fetch limit candles before now)
+            start_time = datetime.datetime.utcnow()
+
+            # Official API signature (from docs):
+            # get_historical_candles(symbol, timeframe, start_time, limit)
             candles_raw = await account.get_historical_candles(
-                symbol, timeframe, None, limit
+                symbol=symbol,
+                timeframe=timeframe,
+                start_time=start_time,
+                limit=limit
             )
+
+            if candles_raw is None:
+                print(f"get_historical_candles returned None for {symbol} {timeframe}. "
+                      "Your account may be G2 — trying RPC fallback.")
+                return None
 
             result = []
             for c in candles_raw:
-                # candles are dicts in Python SDK
                 result.append({
                     "time":   str(c.get("time", "")),
                     "open":   float(c.get("open",  0)),
@@ -60,7 +74,8 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
                     "close":  float(c.get("close", 0)),
                     "volume": float(c.get("tickVolume", c.get("volume", 0))),
                 })
-            return result
+            return result if result else None
+
         finally:
             await api.close()
 
@@ -72,6 +87,43 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
         return result
     except Exception as e:
         print(f"SDK error: {e}")
+        return None
+
+
+# ============================================================
+#  RPC fallback — get live price only (works on ALL accounts)
+#  Used by check_open_trades when candle fetch fails
+# ============================================================
+def sdk_get_price(symbol: str):
+    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
+        return None
+
+    async def _fetch():
+        api = MetaApi(METAAPI_TOKEN)
+        try:
+            account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
+            if account.state not in ('DEPLOYING', 'DEPLOYED'):
+                await account.deploy()
+            await account.wait_connected()
+
+            connection = account.get_rpc_connection()
+            await connection.connect()
+            await connection.wait_synchronized()
+
+            price = await connection.get_symbol_price(symbol=symbol)
+            # price dict has 'bid', 'ask'
+            return (price.get('bid', 0) + price.get('ask', 0)) / 2
+        finally:
+            await api.close()
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(_fetch())
+        loop.close()
+        return result
+    except Exception as e:
+        print(f"Price fetch error: {e}")
         return None
 
 
@@ -135,11 +187,13 @@ def run_sniper_analysis():
     raw1  = sdk_get_candles("XAUUSD", "1m",  500)
 
     if not raw15 or not raw1 or len(raw15) < 50 or len(raw1) < 10:
+        # Try to get at least current price via RPC
+        price = sdk_get_price("XAUUSD") or 0
         return {
             "signal": "HOLD", "entry_zone": None, "sl": None, "tp": None,
             "trend": "Data Unavailable", "sweep_detected": False,
             "sweep_type": None, "sweep_level": None,
-            "mss": None, "fvg": None, "current_price": 0
+            "mss": None, "fvg": None, "current_price": price
         }
 
     candles15     = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
@@ -197,11 +251,16 @@ def run_sniper_analysis():
 def check_open_trades():
     while True:
         try:
+            # Try candle first, fall back to price
             raw = sdk_get_candles("XAUUSD", "1m", 2)
-            if not raw:
+            if raw:
+                current_price = raw[-1]["close"]
+            else:
+                current_price = sdk_get_price("XAUUSD")
+
+            if current_price is None:
                 _time.sleep(15)
                 continue
-            current_price = raw[-1]["close"]
 
             con    = sqlite3.connect(DB_PATH)
             trades = con.execute(
@@ -311,10 +370,26 @@ def dashboard():
 
 @app.get("/test-metaapi")
 def test_metaapi():
+    """Test candle fetch. If None, shows account type warning."""
     raw = sdk_get_candles("XAUUSD", "1m", 5)
     if raw is None:
-        return {"status": "error", "message": "SDK returned None. Check METAAPI_TOKEN and METAAPI_ACCOUNT_ID env vars."}
+        price = sdk_get_price("XAUUSD")
+        return {
+            "status": "candles_unavailable",
+            "message": "get_historical_candles returned None. Your account may be G2 type. "
+                       "Check metaapi.cloud dashboard → your account type.",
+            "live_price_via_rpc": price
+        }
     return {"status": "ok", "candles": raw[-5:]}
+
+
+@app.get("/test-price")
+def test_price():
+    """Test live price via RPC (works on all account types)."""
+    price = sdk_get_price("XAUUSD")
+    if price is None:
+        return {"status": "error", "message": "Could not fetch price via RPC."}
+    return {"status": "ok", "XAUUSD_price": price}
 
 
 @app.get("/master-signal")
