@@ -1,6 +1,6 @@
-# main.py – Tradevil AGI OS (Fixed MetaApi SDK v29 – get_historical_candles)
+# main.py – Tradevil AGI OS (MetaApi SDK v29 – CORRECT: account.get_historical_candles)
 import os, json, sqlite3, datetime, threading, time as _time
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -24,52 +24,34 @@ app.add_middleware(
 )
 
 # ============================================================
-#  MetaApi SDK v29 – CORRECT candle fetch
-#  Uses: account.get_historical_market_data_api()
-#        .get_historical_candles(symbol, tf, start_time, limit)
+#  MetaApi SDK v29 – VERIFIED CORRECT METHOD
+#  account.get_historical_candles(symbol, timeframe, start_time, limit)
+#  Direct on account object — no sub-connection needed
 # ============================================================
 def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
-    """
-    Fetch historical candles from MetaApi.
-    timeframe examples: '1m', '5m', '15m', '1h', '4h', '1d'
-    Returns list of dicts or None on failure.
-    """
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         print("MetaApi credentials missing.")
         return None
-
-    # Map simple strings to MetaApi timeframe constants
-    TF_MAP = {
-        "1m":  "1m",
-        "5m":  "5m",
-        "15m": "15m",
-        "30m": "30m",
-        "1h":  "1h",
-        "4h":  "4h",
-        "1d":  "1d",
-    }
-    tf = TF_MAP.get(timeframe, timeframe)
 
     async def _fetch():
         api = MetaApi(METAAPI_TOKEN)
         try:
             account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
 
-            # Deploy if not yet deployed
+            # Deploy if needed
             if account.state not in ('DEPLOYING', 'DEPLOYED'):
                 await account.deploy()
             await account.wait_connected()
 
-            # ✅ CORRECT: use historical market data API (no RPC needed)
-            history_api = account.get_historical_market_data_api()
-
-            start_time = datetime.datetime.utcnow()
-            candles_raw = await history_api.get_historical_candles(
-                symbol, tf, start_time, limit
+            # ✅ CORRECT v29 method: directly on account object
+            # start_time=None → fetches latest candles
+            candles_raw = await account.get_historical_candles(
+                symbol, timeframe, None, limit
             )
 
             result = []
             for c in candles_raw:
+                # candles are dicts in Python SDK
                 result.append({
                     "time":   str(c.get("time", "")),
                     "open":   float(c.get("open",  0)),
@@ -80,7 +62,6 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
                 })
             return result
         finally:
-            # Close websocket connections to avoid resource leaks
             await api.close()
 
     try:
@@ -95,7 +76,7 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
 
 
 # ============================================================
-#  Sniper Logic (SMC – Sweep → MSS → FVG)
+#  Sniper Logic (SMC: Sweep → MSS → FVG)
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -127,8 +108,8 @@ def detect_liquidity_sweep(candles, swing_highs, swing_lows):
 def detect_mss(candles, lookback=3):
     if len(candles) < lookback + 2:
         return None
-    recent = candles[-lookback - 1:-1]
-    curr   = candles[-1]
+    recent     = candles[-lookback - 1:-1]
+    curr       = candles[-1]
     swing_high = max(c["high"] for c in recent)
     swing_low  = min(c["low"]  for c in recent)
     if curr["close"] > swing_high:
@@ -161,8 +142,8 @@ def run_sniper_analysis():
             "mss": None, "fvg": None, "current_price": 0
         }
 
-    candles15    = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
-    candles1     = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
+    candles15     = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
+    candles1      = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
     current_price = candles1[-1]["close"]
 
     closes15 = pd.Series([c["close"] for c in candles15])
@@ -222,7 +203,7 @@ def check_open_trades():
                 continue
             current_price = raw[-1]["close"]
 
-            con = sqlite3.connect(DB_PATH)
+            con    = sqlite3.connect(DB_PATH)
             trades = con.execute(
                 "SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL"
             ).fetchall()
@@ -249,10 +230,8 @@ def check_open_trades():
                     )
                     con.commit()
             con.close()
-
         except Exception as e:
             print(f"Checker error: {e}")
-
         _time.sleep(15)
 
 
@@ -262,17 +241,14 @@ def check_open_trades():
 def run_news_analysis():
     return {"prob_buy": 0.5, "prob_sell": 0.5, "prob_hold": 0.0}
 
-
 class RiskManager:
     def evaluate(self):
         return {"prob_buy": 0.33, "prob_sell": 0.33, "prob_hold": 0.34}
-
 
 class StrategySelector:
     def __init__(self, config): pass
     def select(self, pair, mtf):
         return {"name": "default", "prob_buy": 0.5, "prob_sell": 0.5, "prob_hold": 0.0}
-
 
 class GeminiAnalyst:
     def __init__(self, key): pass
@@ -283,7 +259,7 @@ class GeminiAnalyst:
 # ============================================================
 #  Init
 # ============================================================
-daily_tracker  = type('', (object,), {
+daily_tracker = type('', (object,), {
     "check_reset": lambda self: None,
     "stats":       lambda self: {"daily_pnl": 0}
 })()
@@ -292,7 +268,6 @@ strategy_selector = StrategySelector(config)
 gemini_analyst    = GeminiAnalyst(GEMINI_API_KEY)
 
 DB_PATH = "journal.db"
-
 
 def init_db():
     con = sqlite3.connect(DB_PATH)
@@ -322,7 +297,6 @@ def init_db():
     con.commit()
     con.close()
 
-
 init_db()
 threading.Thread(target=check_open_trades, daemon=True).start()
 
@@ -337,21 +311,19 @@ def dashboard():
 
 @app.get("/test-metaapi")
 def test_metaapi():
-    """Quick health-check: fetch last 5 candles from XAUUSD 1m."""
     raw = sdk_get_candles("XAUUSD", "1m", 5)
     if raw is None:
-        return {"status": "error", "message": "SDK returned None. Check token / account ID / connection."}
+        return {"status": "error", "message": "SDK returned None. Check METAAPI_TOKEN and METAAPI_ACCOUNT_ID env vars."}
     return {"status": "ok", "candles": raw[-5:]}
 
 
 @app.get("/master-signal")
 def master_signal():
-    sniper       = run_sniper_analysis()
-    news         = run_news_analysis()
-    mtf          = {"htf_bias": "Bullish", "confluence_score": 6}
-    risk_eval    = risk_manager.evaluate()
-    strategy     = strategy_selector.select("XAUUSD", mtf)
-    now          = datetime.datetime.utcnow()
+    sniper        = run_sniper_analysis()
+    mtf           = {"htf_bias": "Bullish", "confluence_score": 6}
+    risk_eval     = risk_manager.evaluate()
+    strategy      = strategy_selector.select("XAUUSD", mtf)
+    now           = datetime.datetime.utcnow()
     gemini_advice = {"summary": "Gemini throttled"}
 
     if sniper["signal"] == "BUY":
@@ -375,13 +347,12 @@ def master_signal():
 
     risk_brief = None
     if decision in ("BUY", "SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
-        entry = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
+        entry      = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry": round(entry, 2), "sl": sniper["sl"], "tp": sniper["tp"]}
 
         con = sqlite3.connect(DB_PATH)
         con.execute(
-            "INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
             (now.isoformat(), "XAUUSD", decision,
              risk_brief["entry"], risk_brief["sl"], risk_brief["tp"],
              strategy["name"], gemini_advice.get("summary", ""))
@@ -394,7 +365,7 @@ def master_signal():
     for ag, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
         act = max(probs, key=probs.get)
         con2.execute(
-            "INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+            "INSERT INTO agent_log (hour,agent,action,prob,details) VALUES (?,?,?,?,?)",
             (hour, ag, act, probs[act], json.dumps(probs))
         )
     con2.commit()
@@ -417,7 +388,7 @@ def master_signal():
 
 @app.get("/agent-log")
 def agent_log():
-    con = sqlite3.connect(DB_PATH)
+    con  = sqlite3.connect(DB_PATH)
     rows = con.execute(
         "SELECT hour, agent, action, prob, details FROM agent_log "
         "WHERE hour >= datetime('now','-1 hour') ORDER BY id DESC LIMIT 20"
@@ -428,7 +399,7 @@ def agent_log():
 
 @app.get("/today-trades")
 def today_trades():
-    con = sqlite3.connect(DB_PATH)
+    con  = sqlite3.connect(DB_PATH)
     rows = con.execute(
         "SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl "
         "FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC"
