@@ -1,12 +1,11 @@
-# main.py – Tradevil AGI OS (MetaApi Live Data + Execution)
+# main.py – Tradevil AGI OS (MetaApi REST Data + Sniper + Paper Trading)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import requests
 import pandas as pd
-import asyncio
-from metaapi_cloud_sdk import MetaApi
 
 # ---------- Config ----------
 CONFIG_PATH = "config.json"
@@ -19,28 +18,32 @@ METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ========== MetaApi Data Fetching ==========
-async def get_metaapi_candles(symbol, timeframe, limit=500):
-    api = MetaApi(METAAPI_TOKEN)
-    account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
-    connection = account.connect()
-    await connection.wait_synchronized()
-    candles = await connection.get_historical_candles(symbol, timeframe, limit)
-    return candles
+# ========== MetaApi REST Data Fetching ==========
+BASE_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 
-def fetch_candles_sync(symbol, timeframe, limit=500):
-    """Wrapper to call async get_metaapi_candles from sync context."""
+def rest_get_candles(symbol, timeframe, limit=500):
+    """Fetch candles via MetaApi REST API (synchronous)."""
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return None
+    url = f"{BASE_URL}/users/current/accounts/{METAAPI_ACCOUNT_ID}/historical-candles/{symbol}/{timeframe}"
+    headers = {
+        "auth-token": METAAPI_TOKEN,
+        "Content-Type": "application/json"
+    }
+    params = {"limit": limit, "fillMissingCandles": "true"}
     try:
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(get_metaapi_candles(symbol, timeframe, limit))
-        return result
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        if resp.status_code != 200:
+            print(f"MetaApi REST error {resp.status_code}: {resp.text}")
+            return None
+        data = resp.json()
+        # data is a list of dicts: time, open, high, low, close, volume
+        return data
     except Exception as e:
-        print(f"MetaApi fetch error: {e}")
+        print(f"MetaApi REST exception: {e}")
         return None
 
-# ========== Sniper Logic (adapted for MetaApi candles) ==========
+# ========== Sniper Logic ==========
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
     for i in range(lookback, len(candles) - lookback):
@@ -92,30 +95,24 @@ def detect_fvg(candles):
 def run_sniper_analysis():
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return {
-            "signal": "HOLD",
-            "entry_zone": None, "sl": None, "tp": None,
-            "trend": "MetaApi keys missing",
-            "sweep_detected": False,
+            "signal": "HOLD", "entry_zone": None, "sl": None, "tp": None,
+            "trend": "MetaApi keys missing", "sweep_detected": False,
             "sweep_type": None, "sweep_level": None,
-            "mss": None, "fvg": None,
-            "current_price": 0
+            "mss": None, "fvg": None, "current_price": 0
         }
 
-    raw15 = fetch_candles_sync("XAUUSD", "15m", 500)
-    raw1  = fetch_candles_sync("XAUUSD", "1m", 500)
+    raw15 = rest_get_candles("XAUUSD", "15m", 500)
+    raw1  = rest_get_candles("XAUUSD", "1m", 500)
 
     if raw15 is None or raw1 is None or len(raw15) < 50 or len(raw1) < 10:
         return {
-            "signal": "HOLD",
-            "entry_zone": None, "sl": None, "tp": None,
-            "trend": "Insufficient data",
-            "sweep_detected": False,
+            "signal": "HOLD", "entry_zone": None, "sl": None, "tp": None,
+            "trend": "Insufficient data", "sweep_detected": False,
             "sweep_type": None, "sweep_level": None,
-            "mss": None, "fvg": None,
-            "current_price": 0
+            "mss": None, "fvg": None, "current_price": 0
         }
 
-    # Convert to list of dicts (MetaApi candles: open, high, low, close, time)
+    # Convert to list of dicts (MetaApi REST returns lowercase keys)
     candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
     candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
     current_price = candles1[-1]["close"]
@@ -136,12 +133,10 @@ def run_sniper_analysis():
 
     if not latest_sweep:
         return {
-            "signal": "HOLD",
-            "entry_zone": None, "sl": None, "tp": None,
+            "signal": "HOLD", "entry_zone": None, "sl": None, "tp": None,
             "trend": trend, "sweep_detected": False,
             "sweep_type": None, "sweep_level": None,
-            "mss": None, "fvg": None,
-            "current_price": current_price
+            "mss": None, "fvg": None, "current_price": current_price
         }
 
     mss = detect_mss(candles1, 3)
@@ -177,45 +172,15 @@ def run_sniper_analysis():
         "current_price": current_price
     }
 
-# ========== MetaApi Trade Execution ==========
-async def place_metaapi_order(signal, entry, sl, tp):
-    api = MetaApi(METAAPI_TOKEN)
-    account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
-    connection = account.connect()
-    await connection.wait_synchronized()
-    if signal == "BUY":
-        await connection.create_market_buy_order(
-            symbol="XAUUSD", volume=0.01, stop_loss=sl, take_profit=tp, comment="Tradevil AI"
-        )
-    else:
-        await connection.create_market_sell_order(
-            symbol="XAUUSD", volume=0.01, stop_loss=sl, take_profit=tp, comment="Tradevil AI"
-        )
-
-def execute_trade_sync(signal, entry, sl, tp):
-    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
-        print("MetaApi keys missing – order not placed")
-        return
-    try:
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(place_metaapi_order(signal, entry, sl, tp))
-    except Exception as e:
-        print(f"Order failed: {e}")
-
-# ========== Paper Trading Checker (uses MetaApi price) ==========
+# ========== Paper Trading Checker (uses MetaApi REST for live price) ==========
 def check_open_trades():
     while True:
         try:
-            # Get current price from MetaApi
             current_price = None
             if METAAPI_TOKEN and METAAPI_ACCOUNT_ID:
-                try:
-                    loop = asyncio.new_event_loop()
-                    raw = loop.run_until_complete(get_metaapi_candles("XAUUSD", "1m", 1))
-                    if raw:
-                        current_price = raw[0]["close"]
-                except:
-                    pass
+                raw = rest_get_candles("XAUUSD", "1m", 1)
+                if raw and len(raw) > 0:
+                    current_price = raw[0]["close"]
             if current_price is None:
                 _time.sleep(15)
                 continue
@@ -236,7 +201,7 @@ def check_open_trades():
                     elif current_price >= tp:
                         outcome = "WIN"
                         pnl = round((tp - entry) * 100, 2)
-                else:  # SELL
+                else:
                     if current_price >= sl:
                         outcome = "LOSS"
                         pnl = round((entry - sl) * 100, 2)
@@ -295,13 +260,20 @@ def init_db():
     con.close()
 init_db()
 
-# Start background threads
 threading.Thread(target=check_open_trades, daemon=True).start()
 
 # ---------- Routes ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
+
+@app.get("/test-metaapi")
+def test_metaapi():
+    """Debug endpoint to verify MetaApi REST connection."""
+    raw = rest_get_candles("XAUUSD", "1m", 5)
+    if raw is None:
+        return {"status": "error", "message": "MetaApi returned no data. Check keys or account status."}
+    return {"status": "ok", "candles": raw[-5:]}
 
 @app.get("/master-signal")
 def master_signal():
@@ -338,17 +310,12 @@ def master_signal():
         entry = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
 
-        # Log trade
         con = sqlite3.connect(DB_PATH)
         con.execute("INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
                     (now.isoformat(), "XAUUSD", decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strategy["name"], gemini_advice.get("summary","")))
         con.commit()
         con.close()
 
-        # Execute live order on MT5 demo account
-        execute_trade_sync(decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"])
-
-    # Agent log
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
