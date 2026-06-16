@@ -1,20 +1,34 @@
+import os
 import google.generativeai as genai
 
 class GeminiAnalyst:
-    def __init__(self, api_key):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel("gemini-pro")
+    def __init__(self, api_key=None):
+        key = api_key or os.environ.get("GEMINI_API_KEY")
+        if key:
+            genai.configure(api_key=key)
+            self.model = genai.GenerativeModel("gemini-1.5-flash")
+            self.available = True
+        else:
+            self.available = False
 
     def analyze(self, tech, news, mtf, daily_stats):
-        prompt = f"""
-        Market: XAUUSD, Price: {tech['current_price']}
-        Daily P&L: {daily_stats}
-        News: {news}
-        MTF: {mtf}
-        Why did previous trades lose? Suggest adjustments for SL/TP, entry logic.
-        Return JSON: {{"summary":"...", "recommended_action":"BUY/SELL/HOLD", "confidence":0.8, "new_strategy_params":{{}}}}"""
+        if not self.available:
+            return {"summary": "Gemini API key not set"}
         try:
+            prompt = f"""You are a senior trading analyst. Analyze this market data and provide a short recommendation with reasoning.
+
+Market Data:
+- Pair: XAUUSD
+- Price: {tech['current_price']}
+- Tech Signal: {tech.get('signal')}
+- News Risk: {news}
+- MTF Bias: {mtf.get('htf_bias')}, Confluence: {mtf.get('confluence_score')}
+- Daily P&L: {daily_stats}
+
+Return a JSON object with keys: "summary", "recommended_action" (BUY/SELL/HOLD), "confidence" (0-1), "reasoning"."""
             resp = self.model.generate_content(prompt)
-            return eval(resp.text)  # careful, use json.loads in prod
-        except:
-            return {"summary": "Gemini unavailable"}
+            # Try to parse JSON from response
+            import json
+            return json.loads(resp.text.replace("```json","").replace("```",""))
+        except Exception as e:
+            return {"summary": f"Gemini error: {e}"}
