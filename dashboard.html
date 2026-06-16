@@ -1,71 +1,45 @@
-<html><head><title>Tradevil AGI Dashboard</title>
+<html><head><title>Tradevil AGI</title>
 <meta http-equiv="refresh" content="15"/>
 <style>
-body{background:#0d1117;color:#c9d1d9;font-family:-apple-system, sans-serif;padding:20px}
-h1{color:#58a6ff}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:15px}
-.card{background:#161b22;padding:15px;border-radius:10px;border:1px solid #30363d}
-select,button{padding:8px;margin:5px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px}
-table{width:100%;border-collapse:collapse;margin-top:10px}
+body{background:#0d1117;color:#c9d1d9;font-family:sans-serif;padding:20px}
+.card{background:#161b22;padding:15px;margin:10px;border-radius:10px;border:1px solid #30363d}
+h1{color:#58a6ff} select,button{padding:8px;margin:5px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px}
+table{width:100%;border-collapse:collapse}
 th,td{padding:8px;border:1px solid #30363d;text-align:center}
-th{background:#21262d}
 .profit{color:#3fb950} .loss{color:#f85149}
 </style></head><body>
-<h1>🤖 Tradevil AGI OS</h1>
+<h1>🤖 Tradevil AGI OS – Sniper Edition</h1>
 <div>
 <select id="pairSelect"><option>XAUUSD</option><option>EURUSD</option><option>BTCUSD</option></select>
 <button onclick="setPair()">Set Pair</button>
 <button onclick="fetchNow()">Force Refresh</button>
 </div>
-
-<div class="grid" style="margin-top:20px">
-  <div class="card"><h3>⚡ Main Decision</h3><div id="decision"></div></div>
-  <div class="card"><h3>🧠 Gemini AI</h3><div id="gemini"></div></div>
-  <div class="card"><h3>📊 Risk Brief</h3><div id="risk"></div></div>
-</div>
-
-<h2>🧩 Agent Activity (last hour)</h2>
-<div class="grid" id="agentCards"></div>
-
-<h2>📈 Today's Trades</h2>
-<div id="trades"></div>
-
+<div class="card" id="status"></div>
+<div class="card" id="decision"></div>
+<div class="card" id="marketInfo"></div>
+<div class="card"><h3>🧠 Gemini AI</h3><div id="gemini"></div></div>
+<div class="card"><h3>📊 Risk Brief</h3><div id="risk"></div></div>
+<h2>🧩 Agent Activity (last hour)</h2><div id="agentCards"></div>
+<h2>📈 Today's Trades</h2><div id="trades"></div>
 <script>
 let currentPair = 'XAUUSD';
-async function setPair() {
-  currentPair = document.getElementById('pairSelect').value;
-  await fetch('/set-pair?pair='+currentPair, {method:'POST'});
-  fetchNow();
-}
+async function setPair() { currentPair = document.getElementById('pairSelect').value; await fetch('/set-pair?pair='+currentPair, {method:'POST'}); fetchNow(); }
 async function fetchNow() {
-  try {
-    let r = await fetch('/master-signal');
-    let d = await r.json();
-    document.getElementById('decision').innerHTML = `<b>${d.decision}</b><br><small>${JSON.stringify(d.probabilities)}</small>`;
+    let r = await fetch('/master-signal'); let d = await r.json();
+    document.getElementById('status').innerHTML = `<b>Current Price:</b> ${d.current_price} <br><b>Trend:</b> ${d.market_trend} <br><b>Sweep:</b> ${d.sweep_detected ? d.sweep_type + ' at ' + d.sweep_level : 'None'}<br><b>MSS:</b> ${d.mss||'None'}<br><b>FVG:</b> ${d.fvg ? JSON.stringify(d.fvg) : 'None'}`;
+    document.getElementById('decision').innerHTML = `<h2>⚡ Decision: ${d.decision}</h2><pre>${JSON.stringify(d.probabilities)}</pre>`;
     document.getElementById('gemini').innerText = d.gemini_advice?.summary || 'N/A';
-    let rb = d.risk_brief;
-    document.getElementById('risk').innerHTML = rb ? `Entry: ${rb.entry}<br>SL: ${rb.sl}<br>TP: ${rb.tp}` : 'No trade';
-
+    if(d.risk_brief) document.getElementById('risk').innerHTML = `Entry: ${d.risk_brief.entry}<br>SL: ${d.risk_brief.sl}<br>TP: ${d.risk_brief.tp}`;
+    else document.getElementById('risk').innerText = 'No trade';
     // Agent logs
-    r = await fetch('/agent-log');
-    let logs = await r.json();
-    let html = '';
-    logs.forEach(l => {
-      html += `<div class="card"><strong>${l.agent}</strong><br>Action: ${l.action}<br>Prob: ${l.prob}<br><small>${l.hour}</small></div>`;
-    });
-    document.getElementById('agentCards').innerHTML = html || '<p>No logs yet</p>';
-
-    // Today's trades
-    r = await fetch('/today-trades');
-    let trades = await r.json();
-    let table = '<table><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th></tr>';
-    trades.forEach(t => {
-      let cls = t.pnl > 0 ? 'profit' : (t.pnl < 0 ? 'loss' : '');
-      table += `<tr><td>${t.timestamp}</td><td>${t.pair}</td><td>${t.signal}</td><td>${t.entry}</td><td>${t.sl}</td><td>${t.tp}</td><td>${t.outcome||'pending'}</td><td class="${cls}">${t.pnl||''}</td></tr>`;
-    });
-    table += '</table>';
-    document.getElementById('trades').innerHTML = table;
-  } catch(e) { console.error(e); }
+    r = await fetch('/agent-log'); let logs = await r.json();
+    let html=''; logs.forEach(l=>{html+=`<div class="card"><strong>${l.agent}</strong><br>Action: ${l.action}<br>Prob: ${l.prob}<br><small>${l.hour}</small></div>`;});
+    document.getElementById('agentCards').innerHTML = html || '<p>No logs</p>';
+    // Trades
+    r = await fetch('/today-trades'); let trades = await r.json();
+    let table='<table><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th></tr>';
+    trades.forEach(t=>{ let cls = t.pnl>0?'profit':(t.pnl<0?'loss':''); table+=`<tr><td>${t.timestamp}</td><td>${t.pair}</td><td>${t.signal}</td><td>${t.entry}</td><td>${t.sl}</td><td>${t.tp}</td><td>${t.outcome||'pending'}</td><td class="${cls}">${t.pnl||''}</td></tr>`;});
+    table+='</table>'; document.getElementById('trades').innerHTML = table;
 }
 fetchNow();
 </script></body></html>
