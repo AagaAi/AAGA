@@ -49,12 +49,6 @@ async def get_account():
 
 # ============================================================
 # sdk_get_candles
-# Official MetaApi docs:
-#   candles = await account.get_historical_candles(
-#       symbol='EURUSD', timeframe='1m',
-#       start_time=datetime.fromisoformat('2021-05-01'), limit=1000)
-# start_time = a PAST datetime. Candles BEFORE that time are returned.
-# So: start_time = utcnow() + 1 day → gives us latest 'limit' candles
 # ============================================================
 def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
@@ -63,7 +57,6 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
 
     async def _fetch():
         account = await get_account()
-        # start_time slightly in future → ensures we get the very latest candles
         start_time = datetime.datetime.utcnow() + datetime.timedelta(days=1)
         candles_raw = await account.get_historical_candles(
             symbol=symbol,
@@ -95,9 +88,8 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
         print(f"SDK error: {e}")
         return None
 
-
 # ============================================================
-# sdk_get_price — RPC live price (fallback for trade checker)
+# sdk_get_price — RPC live price (fallback)
 # ============================================================
 def sdk_get_price(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
@@ -124,7 +116,6 @@ def sdk_get_price(symbol: str):
         print(f"Price fetch error: {e}")
         return None
 
-
 # ============================================================
 # execute_trade_sync — Place market order with SL/TP on MT5
 # ============================================================
@@ -134,7 +125,7 @@ def execute_trade_sync(signal, sl, tp, lot=0.01):
         return None
 
     async def _place():
-        account = await get_account()                # re‑use cached connection
+        account = await get_account()
         conn    = account.get_rpc_connection()
         await conn.connect()
         await conn.wait_synchronized()
@@ -169,7 +160,6 @@ def execute_trade_sync(signal, sl, tp, lot=0.01):
         print(f"Order placement error: {e}")
         return None
 
-
 # ============================================================
 # Sniper Logic (SMC: Sweep → MSS → FVG)
 # ============================================================
@@ -190,12 +180,16 @@ def detect_liquidity_sweep(candles, swing_highs, swing_lows):
     for i in range(1, len(candles)):
         c = candles[i]
         for sl_idx in swing_lows:
-            if sl_idx < i and c["low"] < candles[sl_idx]["low"] and c["close"] > candles[sl_idx]["low"]:
-                sweeps.append({"type": "sell_side", "index": i, "level": round(candles[sl_idx]["low"], 2)})
+            level = candles[sl_idx]["low"]
+            if sl_idx < i and c["low"] < level and c["close"] > level:
+                sweeps.append({"type": "sell_side", "index": i,
+                               "level": round(level, 2) if level is not None else None})
                 break
         for sh_idx in swing_highs:
-            if sh_idx < i and c["high"] > candles[sh_idx]["high"] and c["close"] < candles[sh_idx]["high"]:
-                sweeps.append({"type": "buy_side", "index": i, "level": round(candles[sh_idx]["high"], 2)})
+            level = candles[sh_idx]["high"]
+            if sh_idx < i and c["high"] > level and c["close"] < level:
+                sweeps.append({"type": "buy_side", "index": i,
+                               "level": round(level, 2) if level is not None else None})
                 break
     return sweeps
 
@@ -238,8 +232,8 @@ def run_sniper_analysis():
             "mss": None, "fvg": None, "current_price": price
         }
 
-    candles15     = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
-    candles1      = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
+    candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
+    candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
     current_price = candles1[-1]["close"]
 
     closes15 = pd.Series([c["close"] for c in candles15])
@@ -249,8 +243,8 @@ def run_sniper_analysis():
         slope = sma15.iloc[-1] - sma15.iloc[-2]
         trend = "UPTREND" if slope > 0 else ("DOWNTREND" if slope < 0 else "SIDEWAYS")
 
-    sh, sl       = detect_swing_points(candles15, 3)
-    sweeps       = detect_liquidity_sweep(candles15, sh, sl)
+    sh, sl = detect_swing_points(candles15, 3)
+    sweeps = detect_liquidity_sweep(candles15, sh, sl)
     latest_sweep = sweeps[-1] if sweeps else None
 
     if not latest_sweep:
@@ -267,25 +261,53 @@ def run_sniper_analysis():
     signal = "HOLD"
     entry_zone = sl_val = tp_val = None
 
+    # ── Aligned MSS+FVG → refined entry ──
     if latest_sweep["type"] == "sell_side" and mss == "BULLISH" and fvg and fvg["type"] == "bullish":
-        signal     = "BUY"
+        signal = "BUY"
         entry_zone = (fvg["zone_low"], fvg["zone_high"])
-        sl_val     = latest_sweep["level"]
-        tp_val     = round(fvg["zone_high"] + (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
+        sl_val = latest_sweep["level"]
+        tp_val = round(fvg["zone_high"] + (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
 
     elif latest_sweep["type"] == "buy_side" and mss == "BEARISH" and fvg and fvg["type"] == "bearish":
-        signal     = "SELL"
+        signal = "SELL"
         entry_zone = (fvg["zone_low"], fvg["zone_high"])
-        sl_val     = latest_sweep["level"]
-        tp_val     = round(fvg["zone_low"] - (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
+        sl_val = latest_sweep["level"]
+        tp_val = round(fvg["zone_low"] - (fvg["zone_high"] - fvg["zone_low"]) * 2, 2)
+
+    # ── Sweep exists but MSS/FVG missing → aggressive entry based on sweep ──
+    else:
+        sweep_level = latest_sweep["level"]
+        if sweep_level is None or pd.isna(sweep_level) or sweep_level <= 0:
+            # cannot place order without valid level
+            pass
+        else:
+            if latest_sweep["type"] == "sell_side":
+                signal = "BUY"
+                # Entry = current price, SL = sweep level, TP = 2x risk distance
+                risk_dist = abs(current_price - sweep_level)
+                sl_val = sweep_level
+                tp_val = round(current_price + 2 * risk_dist, 2)
+                entry_zone = (current_price, current_price)
+            elif latest_sweep["type"] == "buy_side":
+                signal = "SELL"
+                risk_dist = abs(current_price - sweep_level)
+                sl_val = sweep_level
+                tp_val = round(current_price - 2 * risk_dist, 2)
+                entry_zone = (current_price, current_price)
 
     return {
-        "signal": signal, "entry_zone": entry_zone, "sl": sl_val, "tp": tp_val,
-        "trend": trend, "sweep_detected": True,
-        "sweep_type": latest_sweep["type"], "sweep_level": latest_sweep["level"],
-        "mss": mss, "fvg": fvg, "current_price": current_price
+        "signal": signal,
+        "entry_zone": entry_zone,
+        "sl": sl_val,
+        "tp": tp_val,
+        "trend": trend,
+        "sweep_detected": True,
+        "sweep_type": latest_sweep["type"],
+        "sweep_level": latest_sweep["level"],
+        "mss": mss,
+        "fvg": fvg,
+        "current_price": current_price
     }
-
 
 # ============================================================
 # Paper Trade Checker (background thread)
@@ -478,7 +500,7 @@ def master_signal():
             signal=decision,
             sl=risk_brief["sl"],
             tp=risk_brief["tp"],
-            lot=0.01          # 0.01 lot = micro lot (safe for demo)
+            lot=0.01
         )
         if order_result:
             print(f"✅ MT5 Order placed: {order_result}")
