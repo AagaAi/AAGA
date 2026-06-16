@@ -1,63 +1,20 @@
 # agents/tech_agent.py
 import yfinance as yf
-import numpy as np
 
 def run_tech_analysis(pair):
-    # Spot XAUUSD fix
     if pair == "XAUUSD":
         ticker = yf.Ticker("XAUUSD=X")
     else:
         ticker = yf.Ticker(pair + "=X")
-
-    # Fetch 15m data (5 days enough)
     df = ticker.history(period="5d", interval="15m")
     if df.empty:
-        return no_signal_result()
+        return no_signal()
 
-    # ---- 1. ICT Sweep + FVG (Primary) ----
-    signal, entry_zone, sl, tp = ict_sniper(df)
-
-    # ---- 2. Fallback: Simple Trend (if no ICT signal) ----
-    if not signal:
-        signal, entry_zone, sl, tp = simple_trend_signal(df)
-
-    # ---- 3. Build probabilities ----
-    current = float(df['Close'].iloc[-1])
-    if signal == "BUY":
-        prob_buy, prob_sell, prob_hold = 0.80, 0.10, 0.10
-    elif signal == "SELL":
-        prob_buy, prob_sell, prob_hold = 0.10, 0.80, 0.10
-    else:
-        prob_buy, prob_sell, prob_hold = 0.30, 0.30, 0.40
-
-    return {
-        "current_price": current,
-        "prob_buy": prob_buy,
-        "prob_sell": prob_sell,
-        "prob_hold": prob_hold,
-        "entry_zone": entry_zone,
-        "stop_loss": sl,
-        "take_profit": tp,
-        "signal": signal
-    }
-
-def no_signal_result():
-    return {
-        "current_price": 0,
-        "prob_buy": 0, "prob_sell": 0, "prob_hold": 1,
-        "entry_zone": None, "stop_loss": None, "take_profit": None,
-        "signal": None
-    }
-
-def ict_sniper(df):
-    # Convert to candles
-    candles = [{"high": float(df['High'].iloc[i]),
-                "low": float(df['Low'].iloc[i]),
-                "close": float(df['Close'].iloc[i])}
-               for i in range(len(df))]
+    candles = [{"high": float(df['High'].iloc[i]), "low": float(df['Low'].iloc[i]), "close": float(df['Close'].iloc[i])} for i in range(len(df))]
     n = len(candles)
+    current = candles[-1]["close"]
 
-    # Swing points
+    # Swing points (3-candle lookback)
     swing_highs, swing_lows = [], []
     for i in range(3, n-3):
         if (candles[i]["high"] > max(c["high"] for c in candles[i-3:i]) and
@@ -67,7 +24,7 @@ def ict_sniper(df):
             candles[i]["low"] < min(c["low"] for c in candles[i+1:i+4])):
             swing_lows.append(i)
 
-    # Sweeps
+    # Liquidity sweeps
     sweeps = []
     for i in range(1, n):
         c = candles[i]
@@ -98,34 +55,46 @@ def ict_sniper(df):
                     entry = (fv["low"], fv["high"])
                     sl = sw["level"]
                     tp = fv["high"] + (fv["high"] - fv["low"])
-                    return "BUY", entry, sl, tp
+                    return signal_result("BUY", entry, sl, tp, current)
                 elif sw["type"] == "bullish" and fv["type"] == "bearish":
                     entry = (fv["low"], fv["high"])
                     sl = sw["level"]
                     tp = fv["low"] - (fv["high"] - fv["low"])
-                    return "SELL", entry, sl, tp
-    return None, None, None, None
+                    return signal_result("SELL", entry, sl, tp, current)
 
-def simple_trend_signal(df):
-    # 15-minute 50-period SMA slope
-    if len(df) < 50:
-        return None, None, None, None
+    # Fallback: simple trend
     sma = df['Close'].rolling(50).mean()
+    if len(sma) < 2:
+        return no_signal()
     slope = sma.iloc[-1] - sma.iloc[-2]
-    current = float(df['Close'].iloc[-1])
-    atr = float(df['High'].iloc[-14:].max() - df['Low'].iloc[-14:].min())  # simplified ATR
-
+    atr = float(df['High'].iloc[-14:].max() - df['Low'].iloc[-14:].min())
     if slope > 0:
-        # Uptrend → BUY with SL below recent low, TP 2x ATR
         sl = current - atr * 1.5
         tp = current + atr * 2
-        entry_zone = (current, current)  # market entry
-        return "BUY", entry_zone, max(0, sl), tp
+        return signal_result("BUY", (current, current), sl, tp, current)
     elif slope < 0:
-        # Downtrend → SELL
         sl = current + atr * 1.5
         tp = current - atr * 2
-        entry_zone = (current, current)
-        return "SELL", entry_zone, sl, tp
+        return signal_result("SELL", (current, current), sl, tp, current)
     else:
-        return None, None, None, None
+        return no_signal()
+
+def signal_result(signal, entry_zone, sl, tp, price):
+    return {
+        "current_price": price,
+        "prob_buy": 0.8 if signal=="BUY" else 0.1,
+        "prob_sell": 0.8 if signal=="SELL" else 0.1,
+        "prob_hold": 0.1,
+        "entry_zone": entry_zone,
+        "stop_loss": round(sl,2),
+        "take_profit": round(tp,2),
+        "signal": signal
+    }
+
+def no_signal():
+    return {
+        "current_price": 0,
+        "prob_buy": 0.3, "prob_sell": 0.3, "prob_hold": 0.4,
+        "entry_zone": None, "stop_loss": None, "take_profit": None,
+        "signal": None
+    }
