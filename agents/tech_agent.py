@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 
 def run_tech_analysis(pair):
-    ticker = yf.Ticker(pair + "=X") if pair not in ["XAUUSD"] else yf.Ticker("GC=F")
+    ticker = yf.Ticker(pair + "=X") if pair not in ["XAUUSD"] else yf.Ticker("XAUUSD=X")
     df = ticker.history(period="5d", interval="15m")
     if df.empty:
         return {"current_price":0, "prob_buy":0, "prob_sell":0, "prob_hold":1}
