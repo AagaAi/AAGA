@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Correct MetaApi SDK)
+# main.py – Tradevil AGI OS (Correct MetaApi SDK – get_candles)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -19,7 +19,7 @@ METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ========== MetaApi SDK (correct RPC connection) ==========
+# ========== MetaApi SDK (Correct) ==========
 def sdk_get_candles(symbol, timeframe, limit=500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return None
@@ -27,15 +27,23 @@ def sdk_get_candles(symbol, timeframe, limit=500):
     async def _fetch():
         api = MetaApi(METAAPI_TOKEN)
         account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
-        # Wait for account to be connected to broker
         await account.wait_connected()
-        # Get RPC connection
         connection = account.get_rpc_connection()
         await connection.connect()
         await connection.wait_synchronized()
         try:
-            candles = await connection.get_historical_candles(symbol, timeframe, limit)
-            return candles
+            candles = await connection.get_candles(symbol, timeframe, start_time=None, limit=limit)
+            result = []
+            for candle in candles:
+                result.append({
+                    "time": str(candle.time),
+                    "open": float(candle.open),
+                    "high": float(candle.high),
+                    "low": float(candle.low),
+                    "close": float(candle.close),
+                    "volume": float(candle.volume) if hasattr(candle, 'volume') else 0
+                })
+            return result
         finally:
             await connection.close()
 
@@ -47,7 +55,7 @@ def sdk_get_candles(symbol, timeframe, limit=500):
         print(f"SDK error: {e}")
         return None
 
-# ========== Sniper Logic (same as before) ==========
+# ========== Sniper Logic ==========
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
     for i in range(lookback, len(candles) - lookback):
@@ -136,7 +144,7 @@ def run_sniper_analysis():
             "sweep_detected":True,"sweep_type":latest_sweep["type"],"sweep_level":latest_sweep["level"],
             "mss":mss,"fvg":fvg,"current_price":current_price}
 
-# ========== Paper Trading Checker (SDK) ==========
+# ========== Paper Trading Checker ==========
 def check_open_trades():
     while True:
         try:
@@ -164,7 +172,7 @@ def check_open_trades():
             print(f"Checker error: {e}")
         _time.sleep(15)
 
-# ---------- Other Agents (unchanged) ----------
+# ---------- Other Agents ----------
 def run_news_analysis():
     return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
