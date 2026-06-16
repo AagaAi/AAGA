@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Complete)
+# main.py – Tradevil AGI OS (Complete & Corrected)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -124,25 +124,26 @@ def master_signal():
             tp = tech["take_profit"]
         risk_brief = {"entry": round(entry,2), "sl": round(sl,2), "tp": round(tp,2)}
 
-    # 4. Log to trade journal
-    con = sqlite3.connect(DB_PATH)
-    con.execute("""
-        INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight)
-        VALUES (?,?,?,?,?,?,?,?)
-    """, (
-        datetime.datetime.utcnow().isoformat(),
-        current_pair,
-        decision,
-        risk_brief["entry"] if risk_brief else None,
-        risk_brief["sl"] if risk_brief else None,
-        risk_brief["tp"] if risk_brief else None,
-        strategy["name"],
-        gemini_advice.get("summary", "")
-    ))
-    con.commit()
-    con.close()
+    # 4. Log to trade journal ONLY if actionable trade
+    if decision in ("BUY", "SELL") and risk_brief:
+        con = sqlite3.connect(DB_PATH)
+        con.execute("""
+            INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            datetime.datetime.utcnow().isoformat(),
+            current_pair,
+            decision,
+            risk_brief["entry"],
+            risk_brief["sl"],
+            risk_brief["tp"],
+            strategy["name"],
+            gemini_advice.get("summary", "")
+        ))
+        con.commit()
+        con.close()
 
-    # 5. Log agent activity
+    # 5. Log agent activity (always)
     hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag_name, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
