@@ -1,22 +1,50 @@
-# main.py – Tradevil AGI OS (XAUUSD Spot Sniper + Paper Trading)
+# main.py – Tradevil AGI OS (Twelve Data XAUUSD Sniper + Paper Trading)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import yfinance as yf
+import requests
+import pandas as pd
 
 # ---------- Config ----------
 CONFIG_PATH = "config.json"
 with open(CONFIG_PATH) as f:
     config = json.load(f)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-config["gemini_api_key"] = GEMINI_API_KEY
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
 
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ========== Sniper Logic (XAUUSD Spot Only) ==========
+# ========== Helper: Fetch candles via Twelve Data ==========
+def fetch_twelvedata(symbol, interval, outputsize=500):
+    """Fetch historical candles from Twelve Data. Returns DataFrame or None."""
+    if not TWELVE_DATA_API_KEY:
+        return None
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": TWELVE_DATA_API_KEY,
+        "format": "JSON"
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if "values" not in data:
+            return None
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
+        df.set_index("datetime", inplace=True)
+        df = df.sort_index()
+        return df
+    except Exception:
+        return None
+
+# ========== Sniper Logic (using Twelve Data) ==========
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
     for i in range(lookback, len(candles) - lookback):
@@ -66,22 +94,27 @@ def detect_fvg(candles):
     return None
 
 def run_sniper_analysis():
-    """Fetch live XAUUSD spot data and run strict ICT sniper analysis."""
-    try:
-        # Fetch 15m and 1m data (use period that covers weekend gaps)
-        df15 = yf.Ticker("XAUUSD=X").history(period="5d", interval="15m")
-        df1  = yf.Ticker("XAUUSD=X").history(period="5d", interval="1m")
-    except Exception as e:
-        return empty_result("Data fetch error")
+    # Fetch 15m and 1m data for XAU/USD from Twelve Data
+    df15 = fetch_twelvedata("XAU/USD", "15min", 500)
+    df1  = fetch_twelvedata("XAU/USD", "1min", 500)
 
-    if df15.empty or len(df15) < 50 or df1.empty or len(df1) < 10:
-        return empty_result("Insufficient data (market may be closed)")
+    if df15 is None or df1 is None or df15.empty or df1.empty or len(df15) < 50 or len(df1) < 10:
+        return {
+            "signal": "HOLD",
+            "entry_zone": None, "sl": None, "tp": None,
+            "trend": "Data Unavailable",
+            "sweep_detected": False, "sweep_type": None, "sweep_level": None,
+            "mss": None, "fvg": None,
+            "current_price": 0,
+            "source": "twelvedata" if TWELVE_DATA_API_KEY else "no_key"
+        }
 
+    # Convert DataFrames to list of dicts
     candles15 = [{"high": float(r.High), "low": float(r.Low), "close": float(r.Close)} for r in df15.itertuples()]
     candles1  = [{"high": float(r.High), "low": float(r.Low), "close": float(r.Close)} for r in df1.itertuples()]
     current_price = candles1[-1]["close"]
 
-    # Market Trend (15m SMA slope)
+    # Trend from 15m SMA
     sma15 = df15["Close"].rolling(50).mean()
     if len(sma15) >= 2:
         slope = sma15.iloc[-1] - sma15.iloc[-2]
@@ -89,7 +122,7 @@ def run_sniper_analysis():
     else:
         trend = "Unknown"
 
-    # 15m Swing points & Sweeps
+    # 15m Sweep
     sh, sl = detect_swing_points(candles15, 3)
     sweeps = detect_liquidity_sweep(candles15, sh, sl)
     latest_sweep = sweeps[-1] if sweeps else None
@@ -101,14 +134,14 @@ def run_sniper_analysis():
             "trend": trend, "sweep_detected": False,
             "sweep_type": None, "sweep_level": None,
             "mss": None, "fvg": None,
-            "current_price": current_price
+            "current_price": current_price,
+            "source": "twelvedata"
         }
 
-    # 1m confirmation (MSS + FVG)
+    # 1m confirmation
     mss = detect_mss(candles1, 3)
     fvg = detect_fvg(candles1)
 
-    # Strict entry logic
     signal = "HOLD"
     entry_zone = None
     sl_val = None
@@ -136,17 +169,8 @@ def run_sniper_analysis():
         "sweep_level": latest_sweep["level"],
         "mss": mss,
         "fvg": fvg,
-        "current_price": current_price
-    }
-
-def empty_result(msg="", trend="Unknown", price=0):
-    return {
-        "signal": "HOLD",
-        "entry_zone": None, "sl": None, "tp": None,
-        "trend": trend, "sweep_detected": False,
-        "sweep_type": None, "sweep_level": None,
-        "mss": None, "fvg": None,
-        "current_price": price
+        "current_price": current_price,
+        "source": "twelvedata"
     }
 
 # ========== Paper Trading Engine ==========
@@ -160,12 +184,11 @@ def check_open_trades():
             for tid, pair, sig, entry, sl, tp in trades:
                 if entry is None:
                     continue
-                # Get live XAUUSD spot price
+                # Get live price from Twelve Data (or fallback)
                 try:
-                    df = yf.Ticker("XAUUSD=X").history(period="1d", interval="1m")
-                    if df.empty:
-                        continue
-                    current = df["Close"].iloc[-1]
+                    url = "https://api.twelvedata.com/price?symbol=XAU/USD&apikey=" + TWELVE_DATA_API_KEY
+                    resp = requests.get(url, timeout=5).json()
+                    current = float(resp.get("price", 0))
                 except:
                     continue
 
@@ -193,9 +216,9 @@ def check_open_trades():
             con.close()
         except Exception as e:
             print(f"Paper trade checker: {e}")
-        _time.sleep(15)  # check every 15 seconds
+        _time.sleep(15)
 
-# ---------- Agents (simplified) ----------
+# ---------- Agents ----------
 def run_news_analysis():
     return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
@@ -211,7 +234,7 @@ class StrategySelector:
 class GeminiAnalyst:
     def __init__(self, key): pass
     def analyze(self, *args):
-        return {"summary": "Gemini throttled (quota saver)"}
+        return {"summary": "Gemini throttled"}
 
 # ---------- Initialize ----------
 daily_tracker = type('',(object,),{"check_reset":lambda self:None,"stats":lambda self:{"daily_pnl":0}})()
@@ -237,7 +260,6 @@ def init_db():
     con.close()
 init_db()
 
-# Start paper trade checker thread
 threading.Thread(target=check_open_trades, daemon=True).start()
 
 # ---------- Routes ----------
@@ -254,7 +276,7 @@ def master_signal():
     strategy = strategy_selector.select("XAUUSD", mtf)
 
     now = datetime.datetime.utcnow()
-    gemini_advice = {"summary":"Gemini throttled (quota saver)"}
+    gemini_advice = {"summary":"Gemini throttled"}
 
     if sniper["signal"] == "BUY":
         tech_probs = {"BUY":0.9, "SELL":0.0, "HOLD":0.1}
@@ -280,14 +302,12 @@ def master_signal():
         entry = sniper["entry_zone"][0] if decision == "BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
 
-        # Log trade
         con = sqlite3.connect(DB_PATH)
         con.execute("INSERT INTO trade_journal (timestamp, pair, signal, entry, sl, tp, strategy_used, gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
                     (now.isoformat(), "XAUUSD", decision, risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strategy["name"], gemini_advice.get("summary","")))
         con.commit()
         con.close()
 
-    # Agent log
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag, probs in [("Tech", tech_probs), ("News", news_probs), ("Risk", risk_probs), ("Strategy", strat_probs)]:
@@ -308,7 +328,8 @@ def master_signal():
         "sweep_type": sniper["sweep_type"],
         "mss": sniper["mss"],
         "fvg": sniper["fvg"],
-        "current_price": sniper["current_price"]
+        "current_price": sniper["current_price"],
+        "source": sniper.get("source","twelvedata")
     }
 
 @app.get("/agent-log")
