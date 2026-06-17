@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Ultra Stable)
+# main.py – Tradevil AGI OS (Async – No asyncio.run)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -24,7 +24,7 @@ app.add_middleware(
 )
 
 # ============================================================
-# SINGLE shared MetaApi instance + account
+# SINGLE shared MetaApi instance + account (async)
 # ============================================================
 _api_instance   = None
 _account_cache  = None
@@ -42,15 +42,14 @@ async def get_account():
     return account
 
 # ============================================================
-# sdk_get_candles
+# Async MetaApi helpers
 # ============================================================
-def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
+async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return None
-
-    async def _fetch():
-        account = await get_account()
-        start_time = datetime.datetime.utcnow() + datetime.timedelta(days=1)
+    account = await get_account()
+    start_time = datetime.datetime.utcnow() + datetime.timedelta(days=1)
+    try:
         candles_raw = await account.get_historical_candles(
             symbol=symbol,
             timeframe=timeframe,
@@ -70,90 +69,53 @@ def sdk_get_candles(symbol: str, timeframe: str, limit: int = 500):
                 "volume": float(c.get("tickVolume", c.get("volume", 0))),
             })
         return result
-
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_fetch())
-        loop.close()
-        return result
     except Exception as e:
         print(f"SDK fetch error: {e}")
         return None
 
-# ============================================================
-# sdk_get_price (fallback)
-# ============================================================
-def sdk_get_price(symbol: str):
+async def sdk_get_price_async(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
         return None
-
-    async def _fetch():
-        account    = await get_account()
-        connection = account.get_rpc_connection()
-        await connection.connect()
-        await connection.wait_synchronized()
+    account    = await get_account()
+    connection = account.get_rpc_connection()
+    await connection.connect()
+    await connection.wait_synchronized()
+    try:
         price = await connection.get_symbol_price(symbol=symbol)
-        await connection.close()
         if price:
             return (float(price.get("bid", 0)) + float(price.get("ask", 0))) / 2
-        return None
+    finally:
+        await connection.close()
+    return None
 
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_fetch())
-        loop.close()
-        return result
-    except Exception as e:
-        print(f"Price fetch error: {e}")
-        return None
-
-# ============================================================
-# execute_trade_sync – dedicated new event loop (thread‑safe)
-# ============================================================
-def execute_trade_sync(signal, sl, tp, lot=0.01):
+async def execute_trade_async(signal, sl, tp, lot=0.01):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
-        print("MetaApi credentials missing.")
         return None
-
-    async def _place():
-        account    = await get_account()
-        connection = account.get_rpc_connection()
-        await connection.connect()
-        await connection.wait_synchronized()
-        try:
-            if signal == "BUY":
-                order = await connection.create_market_buy_order(
-                    symbol="XAUUSD",
-                    volume=lot,
-                    stop_loss=sl,
-                    take_profit=tp
-                )
-            else:
-                order = await connection.create_market_sell_order(
-                    symbol="XAUUSD",
-                    volume=lot,
-                    stop_loss=sl,
-                    take_profit=tp
-                )
-            return order
-        finally:
-            await connection.close()
-
+    account    = await get_account()
+    connection = account.get_rpc_connection()
+    await connection.connect()
+    await connection.wait_synchronized()
     try:
-        # Thread‑safe new event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_place())
-        loop.close()
-        return result
-    except Exception as e:
-        print(f"Order placement error: {e}")
-        return None
+        if signal == "BUY":
+            order = await connection.create_market_buy_order(
+                symbol="XAUUSD",
+                volume=lot,
+                stop_loss=sl,
+                take_profit=tp
+            )
+        else:
+            order = await connection.create_market_sell_order(
+                symbol="XAUUSD",
+                volume=lot,
+                stop_loss=sl,
+                take_profit=tp
+            )
+        return order
+    finally:
+        await connection.close()
 
 # ============================================================
-# Sniper Logic (same as before – stable)
+# Async Sniper Logic
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -203,84 +165,83 @@ def detect_fvg(candles):
         return {"type": "bearish", "zone_low": round(c3["high"], 2), "zone_high": round(c1["low"], 2)}
     return None
 
-def run_sniper_analysis():
-    try:
-        raw15 = sdk_get_candles("XAUUSD", "15m", 500)
-        raw1  = sdk_get_candles("XAUUSD", "1m",  200)
+async def run_sniper_analysis():
+    raw15 = await sdk_get_candles_async("XAUUSD", "15m", 500)
+    raw1  = await sdk_get_candles_async("XAUUSD", "1m",  200)
 
-        if not raw15 or not raw1 or len(raw15) < 50 or len(raw1) < 10:
-            price = sdk_get_price("XAUUSD") or 0
-            return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Data Unavailable",
-                    "sweep_detected":False,"sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":price}
+    if not raw15 or not raw1 or len(raw15) < 50 or len(raw1) < 10:
+        price = await sdk_get_price_async("XAUUSD") or 0
+        return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Data Unavailable",
+                "sweep_detected":False,"sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":price}
 
-        candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
-        candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
-        current_price = candles1[-1]["close"]
+    candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
+    candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
+    current_price = candles1[-1]["close"]
 
-        closes15 = pd.Series([c["close"] for c in candles15])
-        sma15    = closes15.rolling(50).mean()
-        trend    = "Unknown"
-        if len(sma15) >= 2 and not pd.isna(sma15.iloc[-1]):
-            slope = sma15.iloc[-1] - sma15.iloc[-2]
-            trend = "UPTREND" if slope > 0 else ("DOWNTREND" if slope < 0 else "SIDEWAYS")
+    closes15 = pd.Series([c["close"] for c in candles15])
+    sma15    = closes15.rolling(50).mean()
+    trend    = "Unknown"
+    if len(sma15) >= 2 and not pd.isna(sma15.iloc[-1]):
+        slope = sma15.iloc[-1] - sma15.iloc[-2]
+        trend = "UPTREND" if slope > 0 else ("DOWNTREND" if slope < 0 else "SIDEWAYS")
 
-        sh, sl = detect_swing_points(candles15, 3)
-        sweeps = detect_liquidity_sweep(candles15, sh, sl)
-        latest_sweep = sweeps[-1] if sweeps else None
+    sh, sl = detect_swing_points(candles15, 3)
+    sweeps = detect_liquidity_sweep(candles15, sh, sl)
+    latest_sweep = sweeps[-1] if sweeps else None
 
-        if not latest_sweep:
-            return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":trend,"sweep_detected":False,
-                    "sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":current_price}
+    if not latest_sweep:
+        return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":trend,"sweep_detected":False,
+                "sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":current_price}
 
-        mss = detect_mss(candles1, 3)
-        fvg = detect_fvg(candles1)
+    mss = detect_mss(candles1, 3)
+    fvg = detect_fvg(candles1)
 
-        signal = "HOLD"; entry_zone = sl_val = tp_val = None
+    signal = "HOLD"; entry_zone = sl_val = tp_val = None
 
-        # Perfect ICT
-        if latest_sweep["type"]=="sell_side" and mss=="BULLISH" and fvg and fvg["type"]=="bullish":
-            signal="BUY"
-            entry_zone = (fvg["zone_low"], fvg["zone_high"])
-            sl_val = latest_sweep["level"]
-            tp_val = round(fvg["zone_high"] + (fvg["zone_high"]-fvg["zone_low"])*2, 2)
-        elif latest_sweep["type"]=="buy_side" and mss=="BEARISH" and fvg and fvg["type"]=="bearish":
-            signal="SELL"
-            entry_zone = (fvg["zone_low"], fvg["zone_high"])
-            sl_val = latest_sweep["level"]
-            tp_val = round(fvg["zone_low"] - (fvg["zone_high"]-fvg["zone_low"])*2, 2)
-        else:
-            sweep_level = latest_sweep["level"]
-            if sweep_level and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
-                if latest_sweep["type"] == "sell_side":
-                    signal="BUY"
-                    risk_dist = abs(current_price - sweep_level)
-                    sl_val = sweep_level
-                    tp_val = round(current_price + 2 * risk_dist, 2)
-                    entry_zone = (current_price, current_price)
-                elif latest_sweep["type"] == "buy_side":
-                    signal="SELL"
-                    risk_dist = abs(current_price - sweep_level)
-                    sl_val = sweep_level
-                    tp_val = round(current_price - 2 * risk_dist, 2)
-                    entry_zone = (current_price, current_price)
+    if latest_sweep["type"]=="sell_side" and mss=="BULLISH" and fvg and fvg["type"]=="bullish":
+        signal="BUY"
+        entry_zone = (fvg["zone_low"], fvg["zone_high"])
+        sl_val = latest_sweep["level"]
+        tp_val = round(fvg["zone_high"] + (fvg["zone_high"]-fvg["zone_low"])*2, 2)
+    elif latest_sweep["type"]=="buy_side" and mss=="BEARISH" and fvg and fvg["type"]=="bearish":
+        signal="SELL"
+        entry_zone = (fvg["zone_low"], fvg["zone_high"])
+        sl_val = latest_sweep["level"]
+        tp_val = round(fvg["zone_low"] - (fvg["zone_high"]-fvg["zone_low"])*2, 2)
+    else:
+        sweep_level = latest_sweep["level"]
+        if sweep_level and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
+            if latest_sweep["type"] == "sell_side":
+                signal="BUY"
+                risk_dist = abs(current_price - sweep_level)
+                sl_val = sweep_level
+                tp_val = round(current_price + 2 * risk_dist, 2)
+                entry_zone = (current_price, current_price)
+            elif latest_sweep["type"] == "buy_side":
+                signal="SELL"
+                risk_dist = abs(current_price - sweep_level)
+                sl_val = sweep_level
+                tp_val = round(current_price - 2 * risk_dist, 2)
+                entry_zone = (current_price, current_price)
 
-        return {"signal":signal,"entry_zone":entry_zone,"sl":sl_val,"tp":tp_val,"trend":trend,
-                "sweep_detected":True,"sweep_type":latest_sweep["type"],"sweep_level":latest_sweep["level"],
-                "mss":mss,"fvg":fvg,"current_price":current_price}
-    except Exception as e:
-        print(f"Sniper analysis error: {e}")
-        return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Error",
-                "sweep_detected":False,"sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":0}
+    return {"signal":signal,"entry_zone":entry_zone,"sl":sl_val,"tp":tp_val,"trend":trend,
+            "sweep_detected":True,"sweep_type":latest_sweep["type"],"sweep_level":latest_sweep["level"],
+            "mss":mss,"fvg":fvg,"current_price":current_price}
 
 # ============================================================
-# Paper Trade Checker (background thread)
+# Paper Trade Checker (background thread) – uses sync wrappers with new loop
 # ============================================================
 def check_open_trades():
     while True:
         try:
-            raw = sdk_get_candles("XAUUSD", "1m", 2)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            raw = loop.run_until_complete(sdk_get_candles_async("XAUUSD", "1m", 2))
             if raw: current_price = raw[-1]["close"]
-            else: current_price = sdk_get_price("XAUUSD")
+            else:
+                current_price = loop.run_until_complete(sdk_get_price_async("XAUUSD"))
+            loop.close()
+
             if current_price is None:
                 _time.sleep(30); continue
 
@@ -306,7 +267,7 @@ def check_open_trades():
         _time.sleep(30)
 
 # ============================================================
-# Stub Agents
+# Stub Agents (unchanged)
 # ============================================================
 def run_news_analysis():
     return {"prob_buy": 0.5, "prob_sell": 0.5, "prob_hold": 0.0}
@@ -359,29 +320,29 @@ init_db()
 threading.Thread(target=check_open_trades, daemon=True).start()
 
 # ============================================================
-# Routes
+# Async Routes
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
 
 @app.get("/test-metaapi")
-def test_metaapi():
-    raw = sdk_get_candles("XAUUSD", "1m", 5)
+async def test_metaapi():
+    raw = await sdk_get_candles_async("XAUUSD", "1m", 5)
     if not raw:
-        price = sdk_get_price("XAUUSD")
+        price = await sdk_get_price_async("XAUUSD")
         return {"status":"candles_failed","message":"get_historical_candles failed.","rpc_live_price":price}
     return {"status":"ok","sample_candles":raw[-3:],"total_fetched":len(raw)}
 
 @app.get("/test-price")
-def test_price():
-    price = sdk_get_price("XAUUSD")
+async def test_price():
+    price = await sdk_get_price_async("XAUUSD")
     if price is None: return {"status":"error","message":"RPC price fetch failed."}
     return {"status":"ok","XAUUSD":round(price,2)}
 
 @app.get("/master-signal")
-def master_signal():
-    sniper        = run_sniper_analysis()
+async def master_signal():
+    sniper        = await run_sniper_analysis()
     mtf           = {"htf_bias":"Bullish","confluence_score":6}
     strategy      = strategy_selector.select("XAUUSD", mtf)
     now           = datetime.datetime.utcnow()
@@ -418,8 +379,8 @@ def master_signal():
                      strategy["name"],gemini_advice.get("summary","")))
         con.commit(); con.close()
 
-        # Live Order
-        order_result = execute_trade_sync(
+        # Live Order (async)
+        order_result = await execute_trade_async(
             signal=decision,
             sl=risk_brief["sl"],
             tp=risk_brief["tp"],
@@ -428,6 +389,7 @@ def master_signal():
         if order_result: print("✅ MT5 Order placed")
         else: print("❌ Order placement failed")
 
+    # Agent logs (sync is fine)
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag, probs in [("Tech",tech_probs),("News",news_probs),("Risk",risk_probs),("Strategy",strat_probs)]:
