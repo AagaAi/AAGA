@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Stable + Valid Stops)
+# main.py – Tradevil AGI OS (Fixed Stops Validation)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -78,7 +78,7 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
     finally: await connection.close()
 
 # ============================================================
-# Sniper Logic (with stops validation)
+# Sniper Logic (with corrected stops validation)
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -124,10 +124,12 @@ def validate_stops(signal, entry, sl, tp, min_distance=0.5):
     if sl is None or tp is None or entry is None:
         return False
     if signal == "BUY":
-        if sl >= entry - min_distance or tp <= entry + min_distance:
+        # SL must be below entry, TP above entry
+        if sl > entry - min_distance or tp < entry + min_distance:
             return False
     else:  # SELL
-        if sl <= entry + min_distance or tp >= entry - min_distance:
+        # SL must be above entry, TP below entry
+        if sl < entry + min_distance or tp > entry - min_distance:
             return False
     return True
 
@@ -183,7 +185,7 @@ async def run_sniper_analysis():
                 tp_val = round(current_price - max(2 * risk_dist, 1.0), 2)
                 entry_zone = (current_price, current_price)
 
-    # Validate stops before returning
+    # Validate stops
     if signal in ("BUY","SELL"):
         entry = entry_zone[0] if signal=="BUY" else entry_zone[1]
         if not validate_stops(signal, entry, sl_val, tp_val):
