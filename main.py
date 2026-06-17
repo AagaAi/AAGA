@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Stable Order Execution)
+# main.py – Tradevil AGI OS (Ultra Stable)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -24,7 +24,7 @@ app.add_middleware(
 )
 
 # ============================================================
-# SINGLE shared MetaApi instance + account (reused)
+# SINGLE shared MetaApi instance + account
 # ============================================================
 _api_instance   = None
 _account_cache  = None
@@ -110,7 +110,7 @@ def sdk_get_price(symbol: str):
         return None
 
 # ============================================================
-# execute_trade_sync – RPC connection, asyncio.run()
+# execute_trade_sync – dedicated new event loop (thread‑safe)
 # ============================================================
 def execute_trade_sync(signal, sl, tp, lot=0.01):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
@@ -142,15 +142,18 @@ def execute_trade_sync(signal, sl, tp, lot=0.01):
             await connection.close()
 
     try:
-        # asyncio.run handles event loop cleanly (Python 3.10+)
-        result = asyncio.run(_place())
+        # Thread‑safe new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(_place())
+        loop.close()
         return result
     except Exception as e:
         print(f"Order placement error: {e}")
         return None
 
 # ============================================================
-# Sniper Logic (SMC: Sweep → MSS → FVG)
+# Sniper Logic (same as before – stable)
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -201,69 +204,73 @@ def detect_fvg(candles):
     return None
 
 def run_sniper_analysis():
-    raw15 = sdk_get_candles("XAUUSD", "15m", 500)
-    raw1  = sdk_get_candles("XAUUSD", "1m",  200)
+    try:
+        raw15 = sdk_get_candles("XAUUSD", "15m", 500)
+        raw1  = sdk_get_candles("XAUUSD", "1m",  200)
 
-    if not raw15 or not raw1 or len(raw15) < 50 or len(raw1) < 10:
-        price = sdk_get_price("XAUUSD") or 0
-        return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Data Unavailable",
-                "sweep_detected":False,"sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":price}
+        if not raw15 or not raw1 or len(raw15) < 50 or len(raw1) < 10:
+            price = sdk_get_price("XAUUSD") or 0
+            return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Data Unavailable",
+                    "sweep_detected":False,"sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":price}
 
-    candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
-    candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
-    current_price = candles1[-1]["close"]
+        candles15 = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw15]
+        candles1  = [{"high": c["high"], "low": c["low"], "close": c["close"]} for c in raw1]
+        current_price = candles1[-1]["close"]
 
-    closes15 = pd.Series([c["close"] for c in candles15])
-    sma15    = closes15.rolling(50).mean()
-    trend    = "Unknown"
-    if len(sma15) >= 2 and not pd.isna(sma15.iloc[-1]):
-        slope = sma15.iloc[-1] - sma15.iloc[-2]
-        trend = "UPTREND" if slope > 0 else ("DOWNTREND" if slope < 0 else "SIDEWAYS")
+        closes15 = pd.Series([c["close"] for c in candles15])
+        sma15    = closes15.rolling(50).mean()
+        trend    = "Unknown"
+        if len(sma15) >= 2 and not pd.isna(sma15.iloc[-1]):
+            slope = sma15.iloc[-1] - sma15.iloc[-2]
+            trend = "UPTREND" if slope > 0 else ("DOWNTREND" if slope < 0 else "SIDEWAYS")
 
-    sh, sl = detect_swing_points(candles15, 3)
-    sweeps = detect_liquidity_sweep(candles15, sh, sl)
-    latest_sweep = sweeps[-1] if sweeps else None
+        sh, sl = detect_swing_points(candles15, 3)
+        sweeps = detect_liquidity_sweep(candles15, sh, sl)
+        latest_sweep = sweeps[-1] if sweeps else None
 
-    if not latest_sweep:
-        return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":trend,"sweep_detected":False,
-                "sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":current_price}
+        if not latest_sweep:
+            return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":trend,"sweep_detected":False,
+                    "sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":current_price}
 
-    mss = detect_mss(candles1, 3)
-    fvg = detect_fvg(candles1)
+        mss = detect_mss(candles1, 3)
+        fvg = detect_fvg(candles1)
 
-    signal = "HOLD"; entry_zone = sl_val = tp_val = None
+        signal = "HOLD"; entry_zone = sl_val = tp_val = None
 
-    # Perfect ICT: Sweep + MSS + FVG
-    if latest_sweep["type"]=="sell_side" and mss=="BULLISH" and fvg and fvg["type"]=="bullish":
-        signal="BUY"
-        entry_zone = (fvg["zone_low"], fvg["zone_high"])
-        sl_val = latest_sweep["level"]
-        tp_val = round(fvg["zone_high"] + (fvg["zone_high"]-fvg["zone_low"])*2, 2)
-    elif latest_sweep["type"]=="buy_side" and mss=="BEARISH" and fvg and fvg["type"]=="bearish":
-        signal="SELL"
-        entry_zone = (fvg["zone_low"], fvg["zone_high"])
-        sl_val = latest_sweep["level"]
-        tp_val = round(fvg["zone_low"] - (fvg["zone_high"]-fvg["zone_low"])*2, 2)
-    else:
-        # Sweep only → aggressive entry with risk management
-        sweep_level = latest_sweep["level"]
-        if sweep_level and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
-            if latest_sweep["type"] == "sell_side":
-                signal="BUY"
-                risk_dist = abs(current_price - sweep_level)
-                sl_val = sweep_level
-                tp_val = round(current_price + 2 * risk_dist, 2)
-                entry_zone = (current_price, current_price)
-            elif latest_sweep["type"] == "buy_side":
-                signal="SELL"
-                risk_dist = abs(current_price - sweep_level)
-                sl_val = sweep_level
-                tp_val = round(current_price - 2 * risk_dist, 2)
-                entry_zone = (current_price, current_price)
+        # Perfect ICT
+        if latest_sweep["type"]=="sell_side" and mss=="BULLISH" and fvg and fvg["type"]=="bullish":
+            signal="BUY"
+            entry_zone = (fvg["zone_low"], fvg["zone_high"])
+            sl_val = latest_sweep["level"]
+            tp_val = round(fvg["zone_high"] + (fvg["zone_high"]-fvg["zone_low"])*2, 2)
+        elif latest_sweep["type"]=="buy_side" and mss=="BEARISH" and fvg and fvg["type"]=="bearish":
+            signal="SELL"
+            entry_zone = (fvg["zone_low"], fvg["zone_high"])
+            sl_val = latest_sweep["level"]
+            tp_val = round(fvg["zone_low"] - (fvg["zone_high"]-fvg["zone_low"])*2, 2)
+        else:
+            sweep_level = latest_sweep["level"]
+            if sweep_level and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
+                if latest_sweep["type"] == "sell_side":
+                    signal="BUY"
+                    risk_dist = abs(current_price - sweep_level)
+                    sl_val = sweep_level
+                    tp_val = round(current_price + 2 * risk_dist, 2)
+                    entry_zone = (current_price, current_price)
+                elif latest_sweep["type"] == "buy_side":
+                    signal="SELL"
+                    risk_dist = abs(current_price - sweep_level)
+                    sl_val = sweep_level
+                    tp_val = round(current_price - 2 * risk_dist, 2)
+                    entry_zone = (current_price, current_price)
 
-    return {"signal":signal,"entry_zone":entry_zone,"sl":sl_val,"tp":tp_val,"trend":trend,
-            "sweep_detected":True,"sweep_type":latest_sweep["type"],"sweep_level":latest_sweep["level"],
-            "mss":mss,"fvg":fvg,"current_price":current_price}
+        return {"signal":signal,"entry_zone":entry_zone,"sl":sl_val,"tp":tp_val,"trend":trend,
+                "sweep_detected":True,"sweep_type":latest_sweep["type"],"sweep_level":latest_sweep["level"],
+                "mss":mss,"fvg":fvg,"current_price":current_price}
+    except Exception as e:
+        print(f"Sniper analysis error: {e}")
+        return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Error",
+                "sweep_detected":False,"sweep_type":None,"sweep_level":None,"mss":None,"fvg":None,"current_price":0}
 
 # ============================================================
 # Paper Trade Checker (background thread)
@@ -418,8 +425,8 @@ def master_signal():
             tp=risk_brief["tp"],
             lot=0.01
         )
-        if order_result: print(f"✅ MT5 Order placed")
-        else: print("❌ Order placement failed (check MetaApi connection)")
+        if order_result: print("✅ MT5 Order placed")
+        else: print("❌ Order placement failed")
 
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
