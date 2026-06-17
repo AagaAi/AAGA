@@ -6,3 +6,4 @@ requests
 pydantic
 metaapi-cloud-sdk
 aiohttp
+google-generativeai
