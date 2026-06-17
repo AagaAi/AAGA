@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Fixed Stops & Autonomous)
+# main.py – Tradevil AGI OS (Stable + Valid Stops)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -175,7 +175,7 @@ async def run_sniper_analysis():
             if latest_sweep["type"] == "sell_side":
                 signal="BUY"; risk_dist = abs(current_price - sweep_level)
                 sl_val = sweep_level
-                tp_val = round(current_price + max(2 * risk_dist, 1.0), 2)  # ensure at least 1 point move
+                tp_val = round(current_price + max(2 * risk_dist, 1.0), 2)
                 entry_zone = (current_price, current_price)
             elif latest_sweep["type"] == "buy_side":
                 signal="SELL"; risk_dist = abs(current_price - sweep_level)
@@ -185,7 +185,7 @@ async def run_sniper_analysis():
 
     # Validate stops before returning
     if signal in ("BUY","SELL"):
-        entry = entry_zone[0] if signal=="BUY" else entry_zone[1]  # approximate entry
+        entry = entry_zone[0] if signal=="BUY" else entry_zone[1]
         if not validate_stops(signal, entry, sl_val, tp_val):
             print(f"⚠️ Invalid stops for {signal}: SL={sl_val}, TP={tp_val}, Entry≈{entry}")
             signal = "HOLD"; entry_zone = None; sl_val = None; tp_val = None
@@ -241,7 +241,6 @@ async def autonomous_trading_loop():
             sniper = await run_sniper_analysis()
             if sniper["signal"] in ("BUY", "SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
                 entry = sniper["entry_zone"][0] if sniper["signal"] == "BUY" else sniper["entry_zone"][1]
-                # Final stops validation
                 if not validate_stops(sniper["signal"], entry, sniper["sl"], sniper["tp"]):
                     print("⏩ Skipping trade – invalid stops after analysis")
                     continue
