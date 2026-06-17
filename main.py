@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Self‑awake + 1‑min autonomous trading)
+# main.py – Tradevil AGI OS (Fixed Stops & Autonomous)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -78,7 +78,7 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
     finally: await connection.close()
 
 # ============================================================
-# Sniper Logic
+# Sniper Logic (with stops validation)
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -118,6 +118,18 @@ def detect_fvg(candles):
     if c1["high"] < c3["low"]: return {"type": "bullish", "zone_low": round(c1["high"], 2), "zone_high": round(c3["low"], 2)}
     elif c1["low"] > c3["high"]: return {"type": "bearish", "zone_low": round(c3["high"], 2), "zone_high": round(c1["low"], 2)}
     return None
+
+def validate_stops(signal, entry, sl, tp, min_distance=0.5):
+    """Ensure SL and TP are valid relative to entry."""
+    if sl is None or tp is None or entry is None:
+        return False
+    if signal == "BUY":
+        if sl >= entry - min_distance or tp <= entry + min_distance:
+            return False
+    else:  # SELL
+        if sl <= entry + min_distance or tp >= entry - min_distance:
+            return False
+    return True
 
 async def run_sniper_analysis():
     raw15 = await sdk_get_candles_async("XAUUSD", "15m", 500)
@@ -161,11 +173,22 @@ async def run_sniper_analysis():
         sweep_level = latest_sweep["level"]
         if sweep_level and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
             if latest_sweep["type"] == "sell_side":
-                signal="BUY"; risk_dist = abs(current_price - sweep_level); sl_val = sweep_level
-                tp_val = round(current_price + 2 * risk_dist, 2); entry_zone = (current_price, current_price)
+                signal="BUY"; risk_dist = abs(current_price - sweep_level)
+                sl_val = sweep_level
+                tp_val = round(current_price + max(2 * risk_dist, 1.0), 2)  # ensure at least 1 point move
+                entry_zone = (current_price, current_price)
             elif latest_sweep["type"] == "buy_side":
-                signal="SELL"; risk_dist = abs(current_price - sweep_level); sl_val = sweep_level
-                tp_val = round(current_price - 2 * risk_dist, 2); entry_zone = (current_price, current_price)
+                signal="SELL"; risk_dist = abs(current_price - sweep_level)
+                sl_val = sweep_level
+                tp_val = round(current_price - max(2 * risk_dist, 1.0), 2)
+                entry_zone = (current_price, current_price)
+
+    # Validate stops before returning
+    if signal in ("BUY","SELL"):
+        entry = entry_zone[0] if signal=="BUY" else entry_zone[1]  # approximate entry
+        if not validate_stops(signal, entry, sl_val, tp_val):
+            print(f"⚠️ Invalid stops for {signal}: SL={sl_val}, TP={tp_val}, Entry≈{entry}")
+            signal = "HOLD"; entry_zone = None; sl_val = None; tp_val = None
 
     return {"signal":signal,"entry_zone":entry_zone,"sl":sl_val,"tp":tp_val,"trend":trend,
             "sweep_detected":True,"sweep_type":latest_sweep["type"],"sweep_level":latest_sweep["level"],
@@ -194,12 +217,11 @@ async def update_pending_trades():
 # ============================================================
 # Autonomous Trading Loop (1 min) + Self‑keep‑alive (3 min)
 # ============================================================
-AUTONOMOUS_INTERVAL_SEC = 60  # 1 minute
-KEEPALIVE_INTERVAL_SEC  = 180 # 3 minutes (keeps Render awake without external pings)
+AUTONOMOUS_INTERVAL_SEC = 60
+KEEPALIVE_INTERVAL_SEC  = 180
 
 async def keep_alive_task():
-    """Periodically ping own /health to prevent Render spin‑down."""
-    await asyncio.sleep(10)  # give startup time
+    await asyncio.sleep(10)
     while True:
         try:
             async with aiohttp.ClientSession() as session:
@@ -218,6 +240,12 @@ async def autonomous_trading_loop():
             await update_pending_trades()
             sniper = await run_sniper_analysis()
             if sniper["signal"] in ("BUY", "SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
+                entry = sniper["entry_zone"][0] if sniper["signal"] == "BUY" else sniper["entry_zone"][1]
+                # Final stops validation
+                if not validate_stops(sniper["signal"], entry, sniper["sl"], sniper["tp"]):
+                    print("⏩ Skipping trade – invalid stops after analysis")
+                    continue
+
                 con = sqlite3.connect(DB_PATH)
                 existing = con.execute(
                     "SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?",
@@ -225,7 +253,6 @@ async def autonomous_trading_loop():
                 ).fetchone()[0]
                 con.close()
                 if existing == 0:
-                    entry = sniper["entry_zone"][0] if sniper["signal"] == "BUY" else sniper["entry_zone"][1]
                     risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
                     con = sqlite3.connect(DB_PATH)
                     con.execute(
@@ -354,7 +381,5 @@ def init_db():
     con.commit(); con.close()
 init_db()
 
-# Uvicorn automatically adds aiohttp, but we need to install it:
-# pip install aiohttp (already in requirements)
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT",8000)))
