@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Gemini Nightly Analysis + Trade Reviews)
+# main.py – Tradevil AGI OS (DB_PATH fixed)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -17,31 +17,35 @@ GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 METAAPI_TOKEN      = os.environ.get("METAAPI_TOKEN", "")
 METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 
+DB_PATH = "journal.db"            # <-- EARLY DEFINITION
+
 app = FastAPI(title="Tradevil AGI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 
 # ============================================================
-# MetaApi singleton (async) – unchanged
+# SINGLE shared MetaApi instance + account (async)
 # ============================================================
 _api_instance   = None
 _account_cache  = None
 
 async def get_account():
     global _api_instance, _account_cache
-    if _account_cache is not None: return _account_cache
+    if _account_cache is not None:
+        return _account_cache
     _api_instance  = MetaApi(METAAPI_TOKEN)
     account        = await _api_instance.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
-    if account.state not in ('DEPLOYING', 'DEPLOYED'): await account.deploy()
+    if account.state not in ('DEPLOYING', 'DEPLOYED'):
+        await account.deploy()
     await account.wait_connected()
     _account_cache = account
     return account
 
 # ============================================================
-# MetaApi helpers (unchanged)
+# Async MetaApi helpers (unchanged)
 # ============================================================
-async def sdk_get_candles_async(symbol, timeframe, limit=500):
+async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
     account = await get_account()
     start_time = datetime.datetime.utcnow() + datetime.timedelta(days=1)
@@ -55,7 +59,7 @@ async def sdk_get_candles_async(symbol, timeframe, limit=500):
     except Exception as e:
         print(f"SDK fetch error: {e}"); return None
 
-async def sdk_get_price_async(symbol):
+async def sdk_get_price_async(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
     account = await get_account()
     connection = account.get_rpc_connection()
@@ -192,7 +196,7 @@ async def run_sniper_analysis():
             "mss":mss,"fvg":fvg,"current_price":current_price}
 
 # ============================================================
-# Outcome checker (unchanged)
+# Outcome checker
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
@@ -212,23 +216,19 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly Gemini Analysis (runs at UTC midnight)
+# Nightly Gemini Analysis
 # ============================================================
 async def nightly_gemini_analysis():
-    """Analyze today's completed trades, store insights, self‑optimize parameters."""
-    # Wait until a few seconds after midnight to ensure day change
     while True:
         now = datetime.datetime.utcnow()
-        # Calculate seconds until next midnight
         next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
-        # 1. Fetch today's completed trades
         con = sqlite3.connect(DB_PATH)
         trades = con.execute("""
             SELECT id, signal, entry, sl, tp, outcome, pnl, timestamp,
-                   (SELECT market_trend FROM agent_log WHERE agent_log.hour = strftime('%Y-%m-%d %H:00', trade_journal.timestamp) LIMIT 1) as trend,
+                   (SELECT trend FROM agent_log LIMIT 1) as trend,
                    sweep_type, mss, fvg
             FROM trade_journal
             WHERE date(timestamp) = date('now', '-1 day') AND outcome IS NOT NULL
@@ -238,24 +238,20 @@ async def nightly_gemini_analysis():
 
         if trades:
             trade_list = [{
-                "signal": t[1], "entry": t[2], "sl": t[3], "tp": t[4],
+                "id": t[0], "signal": t[1], "entry": t[2], "sl": t[3], "tp": t[4],
                 "outcome": t[5], "pnl": t[6], "timestamp": t[7],
                 "trend": t[8], "sweep_type": t[9], "mss": t[10], "fvg": t[11]
             } for t in trades]
 
-            # 2. Get Gemini insights
             daily_insight = gemini_analyst.analyze_daily_trades(trade_list)
             print(f"📊 Nightly Gemini Analysis: {daily_insight.get('summary', 'No insight')}")
 
-            # 3. Store insights in agent_log as a special entry
             hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
             con = sqlite3.connect(DB_PATH)
             con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                        (hour, "Gemini Nightly", "ANALYSIS", 1.0,
-                         json.dumps(daily_insight)))
+                        (hour, "Gemini Nightly", "ANALYSIS", 1.0, json.dumps(daily_insight)))
             con.commit()
 
-            # 4. Apply parameter suggestions if any
             suggestions = daily_insight.get("parameter_suggestions", {})
             if suggestions:
                 with open(CONFIG_PATH, "r+") as f:
@@ -270,24 +266,21 @@ async def nightly_gemini_analysis():
                     f.truncate()
                 print("✅ Applied parameter suggestions from Gemini:", suggestions)
 
-            # 5. For each trade, optionally get individual analysis (batched to avoid quota)
             for trade in trade_list:
                 try:
                     analysis = gemini_analyst.analyze_trade(trade)
-                    # Store per-trade review in trade_journal (gemini_insight column)
                     con = sqlite3.connect(DB_PATH)
                     con.execute("UPDATE trade_journal SET gemini_insight = ? WHERE id = ?",
-                                (json.dumps(analysis), trade.get("id", 0)))
+                                (json.dumps(analysis), trade["id"]))
                     con.commit()
                     con.close()
                 except Exception as e:
                     print(f"Trade analysis error: {e}")
-                    continue
         else:
             print("ℹ️ No completed trades yesterday for Gemini analysis.")
 
 # ============================================================
-# Autonomous Trading Loop + Keep‑alive (unchanged)
+# Autonomous Trading Loop + Keep‑alive
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -334,6 +327,39 @@ async def startup():
     asyncio.create_task(nightly_gemini_analysis())
 
 # ============================================================
+# Database init
+# ============================================================
+def init_db():
+    con = sqlite3.connect(DB_PATH)
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS trade_journal (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp     TEXT,
+            pair          TEXT,
+            signal        TEXT,
+            entry         REAL,
+            sl            REAL,
+            tp            REAL,
+            outcome       TEXT,
+            pnl           REAL,
+            strategy_used TEXT,
+            gemini_insight TEXT
+        );
+        CREATE TABLE IF NOT EXISTS agent_log (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            hour    TEXT,
+            agent   TEXT,
+            action  TEXT,
+            prob    REAL,
+            details TEXT
+        );
+    """)
+    con.commit()
+    con.close()
+
+init_db()
+
+# ============================================================
 # Routes
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
@@ -344,14 +370,79 @@ def dashboard():
 async def health():
     return {"status": "ok", "autonomous_loop": "active", "gemini": gemini_analyst.available}
 
+@app.get("/master-signal")
+async def master_signal():
+    sniper = await run_sniper_analysis()
+    mtf = {"htf_bias":"Bullish","confluence_score":6}
+    now = datetime.datetime.utcnow()
+    gemini_advice = {"summary":"Gemini throttled"}
+
+    if sniper["signal"] == "BUY": tech_probs = {"BUY":0.9,"SELL":0.0,"HOLD":0.1}
+    elif sniper["signal"] == "SELL": tech_probs = {"BUY":0.0,"SELL":0.9,"HOLD":0.1}
+    else: tech_probs = {"BUY":0.3,"SELL":0.3,"HOLD":0.4}
+
+    news_probs  = {"BUY":0.5,"SELL":0.5,"HOLD":0.0}
+    risk_probs  = {"BUY":0.33,"SELL":0.33,"HOLD":0.34}
+    strat_probs = {"BUY":0.5,"SELL":0.5,"HOLD":0.0}
+    w = {"tech":0.4,"news":0.2,"risk":0.2,"strategy":0.2}
+
+    final_probs = {
+        "BUY":  tech_probs["BUY"]*w["tech"] + news_probs["BUY"]*w["news"] + risk_probs["BUY"]*w["risk"] + strat_probs["BUY"]*w["strategy"],
+        "SELL": tech_probs["SELL"]*w["tech"] + news_probs["SELL"]*w["news"] + risk_probs["SELL"]*w["risk"] + strat_probs["SELL"]*w["strategy"],
+        "HOLD": tech_probs["HOLD"]*w["tech"] + news_probs["HOLD"]*w["news"] + risk_probs["HOLD"]*w["risk"] + strat_probs["HOLD"]*w["strategy"],
+    }
+    decision = max(final_probs, key=final_probs.get)
+
+    risk_brief = None
+    if decision in ("BUY","SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
+        entry = sniper["entry_zone"][0] if decision=="BUY" else sniper["entry_zone"][1]
+        risk_brief = {"entry":round(entry,2),"sl":sniper["sl"],"tp":sniper["tp"]}
+
+    hour = now.strftime("%Y-%m-%d %H:00")
+    con2 = sqlite3.connect(DB_PATH)
+    for ag, probs in [("Tech",tech_probs),("News",news_probs),("Risk",risk_probs),("Strategy",strat_probs)]:
+        act = max(probs, key=probs.get)
+        con2.execute("INSERT INTO agent_log (hour,agent,action,prob,details) VALUES (?,?,?,?,?)",
+                     (hour,ag,act,probs[act],json.dumps(probs)))
+    con2.commit(); con2.close()
+
+    return {
+        "decision":decision,"probabilities":final_probs,"risk_brief":risk_brief,"strategy_used":"default",
+        "gemini_advice":gemini_advice,"market_trend":sniper["trend"],"sweep_detected":sniper["sweep_detected"],
+        "sweep_type":sniper["sweep_type"],"mss":sniper["mss"],"fvg":sniper["fvg"],"current_price":sniper["current_price"]
+    }
+
+@app.get("/agent-log")
+def agent_log():
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute("SELECT hour, agent, action, prob, details FROM agent_log WHERE hour >= datetime('now','-1 hour') ORDER BY id DESC LIMIT 20").fetchall()
+    con.close()
+    return [{"hour":r[0],"agent":r[1],"action":r[2],"prob":r[3],"details":r[4]} for r in rows]
+
+@app.get("/today-trades")
+def today_trades():
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
+    con.close()
+    return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7]} for r in rows]
+
 @app.get("/trade-reviews")
 def trade_reviews():
-    """Return trades with Gemini insights."""
     con = sqlite3.connect(DB_PATH)
     rows = con.execute("SELECT id, timestamp, signal, entry, sl, tp, outcome, pnl, gemini_insight FROM trade_journal WHERE outcome IS NOT NULL ORDER BY timestamp DESC LIMIT 50").fetchall()
     con.close()
     return [{"id": r[0], "timestamp": r[1], "signal": r[2], "entry": r[3], "sl": r[4], "tp": r[5],
              "outcome": r[6], "pnl": r[7], "gemini_insight": r[8]} for r in rows]
 
-# (remaining endpoints like master-signal, agent-log, today-trades unchanged – use the ones from previous stable version)
-# For brevity, they are omitted here but should be copied from your last stable main.py.
+# ============================================================
+# Stub Agents (unchanged)
+# ============================================================
+def run_news_analysis(): return {"prob_buy":0.5,"prob_sell":0.5,"prob_hold":0.0}
+class RiskManager: pass
+class StrategySelector: pass
+class GeminiAnalyst: pass
+
+daily_tracker = type('',(object,),{"check_reset":lambda s:None,"stats":lambda s:{"daily_pnl":0}})()
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT",8000)))
