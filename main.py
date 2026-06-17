@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (DB_PATH fixed)
+# main.py – A.A.G.A AI Trading OS (Gemini Optimized, No Throttling)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -17,9 +17,9 @@ GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 METAAPI_TOKEN      = os.environ.get("METAAPI_TOKEN", "")
 METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 
-DB_PATH = "journal.db"            # <-- EARLY DEFINITION
+DB_PATH = "journal.db"
 
-app = FastAPI(title="Tradevil AGI OS")
+app = FastAPI(title="A.A.G.A AI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
@@ -216,7 +216,7 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly Gemini Analysis
+# Nightly Gemini Analysis – ONE call per day (quota friendly)
 # ============================================================
 async def nightly_gemini_analysis():
     while True:
@@ -225,11 +225,10 @@ async def nightly_gemini_analysis():
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
+        # Fetch all completed trades from yesterday
         con = sqlite3.connect(DB_PATH)
         trades = con.execute("""
-            SELECT id, signal, entry, sl, tp, outcome, pnl, timestamp,
-                   (SELECT trend FROM agent_log LIMIT 1) as trend,
-                   sweep_type, mss, fvg
+            SELECT id, signal, entry, sl, tp, outcome, pnl, timestamp
             FROM trade_journal
             WHERE date(timestamp) = date('now', '-1 day') AND outcome IS NOT NULL
             ORDER BY timestamp
@@ -239,19 +238,22 @@ async def nightly_gemini_analysis():
         if trades:
             trade_list = [{
                 "id": t[0], "signal": t[1], "entry": t[2], "sl": t[3], "tp": t[4],
-                "outcome": t[5], "pnl": t[6], "timestamp": t[7],
-                "trend": t[8], "sweep_type": t[9], "mss": t[10], "fvg": t[11]
+                "outcome": t[5], "pnl": t[6], "timestamp": t[7]
             } for t in trades]
 
+            # One Gemini call for daily summary
             daily_insight = gemini_analyst.analyze_daily_trades(trade_list)
-            print(f"📊 Nightly Gemini Analysis: {daily_insight.get('summary', 'No insight')}")
+            print(f"📊 A.A.G.A Nightly Analysis: {daily_insight.get('summary', 'No insight')}")
 
+            # Store the daily insight in agent_log
             hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
             con = sqlite3.connect(DB_PATH)
             con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                        (hour, "Gemini Nightly", "ANALYSIS", 1.0, json.dumps(daily_insight)))
+                        (hour, "A.A.G.A Gemini", "DAILY_REVIEW", 1.0, json.dumps(daily_insight)))
             con.commit()
+            con.close()
 
+            # Apply parameter suggestions if any
             suggestions = daily_insight.get("parameter_suggestions", {})
             if suggestions:
                 with open(CONFIG_PATH, "r+") as f:
@@ -264,20 +266,9 @@ async def nightly_gemini_analysis():
                     f.seek(0)
                     json.dump(cfg, f, indent=2)
                     f.truncate()
-                print("✅ Applied parameter suggestions from Gemini:", suggestions)
-
-            for trade in trade_list:
-                try:
-                    analysis = gemini_analyst.analyze_trade(trade)
-                    con = sqlite3.connect(DB_PATH)
-                    con.execute("UPDATE trade_journal SET gemini_insight = ? WHERE id = ?",
-                                (json.dumps(analysis), trade["id"]))
-                    con.commit()
-                    con.close()
-                except Exception as e:
-                    print(f"Trade analysis error: {e}")
+                print("✅ A.A.G.A self‑optimized parameters:", suggestions)
         else:
-            print("ℹ️ No completed trades yesterday for Gemini analysis.")
+            print("ℹ️ No completed trades yesterday for A.A.G.A analysis.")
 
 # ============================================================
 # Autonomous Trading Loop + Keep‑alive
@@ -315,8 +306,8 @@ async def autonomous_trading_loop():
                                  risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], "default", ""))
                     con.commit(); con.close()
                     order = await execute_trade_async(sniper["signal"], sniper["sl"], sniper["tp"], lot=0.01)
-                    if order: print(f"✅ Auto trade: {sniper['signal']}")
-                    else: print("❌ Auto trade failed")
+                    if order: print(f"✅ A.A.G.A Auto trade: {sniper['signal']}")
+                    else: print("❌ A.A.G.A Auto trade failed")
         except Exception as e: print(f"Autonomous loop error: {e}")
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
@@ -375,7 +366,8 @@ async def master_signal():
     sniper = await run_sniper_analysis()
     mtf = {"htf_bias":"Bullish","confluence_score":6}
     now = datetime.datetime.utcnow()
-    gemini_advice = {"summary":"Gemini throttled"}
+    # Gemini not called here to save quota; use nightly for insights
+    gemini_advice = {"summary": "Available overnight"}
 
     if sniper["signal"] == "BUY": tech_probs = {"BUY":0.9,"SELL":0.0,"HOLD":0.1}
     elif sniper["signal"] == "SELL": tech_probs = {"BUY":0.0,"SELL":0.9,"HOLD":0.1}
@@ -400,7 +392,7 @@ async def master_signal():
 
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
-    for ag, probs in [("Tech",tech_probs),("News",news_probs),("Risk",risk_probs),("Strategy",strat_probs)]:
+    for ag, probs in [("A.A.G.A Tech",tech_probs),("A.A.G.A News",news_probs),("A.A.G.A Risk",risk_probs),("A.A.G.A Strategy",strat_probs)]:
         act = max(probs, key=probs.get)
         con2.execute("INSERT INTO agent_log (hour,agent,action,prob,details) VALUES (?,?,?,?,?)",
                      (hour,ag,act,probs[act],json.dumps(probs)))
@@ -435,7 +427,7 @@ def trade_reviews():
              "outcome": r[6], "pnl": r[7], "gemini_insight": r[8]} for r in rows]
 
 # ============================================================
-# Stub Agents (unchanged)
+# Stub Agents
 # ============================================================
 def run_news_analysis(): return {"prob_buy":0.5,"prob_sell":0.5,"prob_hold":0.0}
 class RiskManager: pass
