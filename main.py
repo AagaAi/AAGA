@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Fixed Stops Validation)
+# main.py – Tradevil AGI OS (Minimum Distance 2.20 enforced)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -78,8 +78,10 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
     finally: await connection.close()
 
 # ============================================================
-# Sniper Logic (with corrected stops validation)
+# Sniper Logic (minimum distance 2.20 enforced)
 # ============================================================
+MIN_STOP_DISTANCE = 2.20   # gold points
+
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
     for i in range(lookback, len(candles) - lookback):
@@ -119,19 +121,27 @@ def detect_fvg(candles):
     elif c1["low"] > c3["high"]: return {"type": "bearish", "zone_low": round(c3["high"], 2), "zone_high": round(c1["low"], 2)}
     return None
 
-def validate_stops(signal, entry, sl, tp, min_distance=0.5):
-    """Ensure SL and TP are valid relative to entry."""
+def validate_stops(signal, entry, sl, tp):
+    """Check minimum distance 2.20 and correct side."""
     if sl is None or tp is None or entry is None:
         return False
     if signal == "BUY":
-        # SL must be below entry, TP above entry
-        if sl > entry - min_distance or tp < entry + min_distance:
+        if sl > entry - MIN_STOP_DISTANCE or tp < entry + MIN_STOP_DISTANCE:
             return False
     else:  # SELL
-        # SL must be above entry, TP below entry
-        if sl < entry + min_distance or tp > entry - min_distance:
+        if sl < entry + MIN_STOP_DISTANCE or tp > entry - MIN_STOP_DISTANCE:
             return False
     return True
+
+def adjust_stops_to_minimum(signal, entry, sl, tp):
+    """Forcibly adjust SL/TP to meet minimum distance, keeping original direction."""
+    if signal == "BUY":
+        sl = min(sl, entry - MIN_STOP_DISTANCE)
+        tp = max(tp, entry + MIN_STOP_DISTANCE)
+    else:
+        sl = max(sl, entry + MIN_STOP_DISTANCE)
+        tp = min(tp, entry - MIN_STOP_DISTANCE)
+    return sl, tp
 
 async def run_sniper_analysis():
     raw15 = await sdk_get_candles_async("XAUUSD", "15m", 500)
@@ -165,6 +175,7 @@ async def run_sniper_analysis():
 
     signal = "HOLD"; entry_zone = sl_val = tp_val = None
 
+    # Perfect ICT (FVG-based entry)
     if latest_sweep["type"]=="sell_side" and mss=="BULLISH" and fvg and fvg["type"]=="bullish":
         signal="BUY"; entry_zone = (fvg["zone_low"], fvg["zone_high"]); sl_val = latest_sweep["level"]
         tp_val = round(fvg["zone_high"] + (fvg["zone_high"]-fvg["zone_low"])*2, 2)
@@ -172,24 +183,27 @@ async def run_sniper_analysis():
         signal="SELL"; entry_zone = (fvg["zone_low"], fvg["zone_high"]); sl_val = latest_sweep["level"]
         tp_val = round(fvg["zone_low"] - (fvg["zone_high"]-fvg["zone_low"])*2, 2)
     else:
+        # Fallback: aggressive entry based on sweep
         sweep_level = latest_sweep["level"]
         if sweep_level and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
+            risk_dist = abs(current_price - sweep_level)
             if latest_sweep["type"] == "sell_side":
-                signal="BUY"; risk_dist = abs(current_price - sweep_level)
+                signal="BUY"
                 sl_val = sweep_level
-                tp_val = round(current_price + max(2 * risk_dist, 1.0), 2)
+                tp_val = round(current_price + max(2 * risk_dist, MIN_STOP_DISTANCE * 2), 2)
                 entry_zone = (current_price, current_price)
             elif latest_sweep["type"] == "buy_side":
-                signal="SELL"; risk_dist = abs(current_price - sweep_level)
+                signal="SELL"
                 sl_val = sweep_level
-                tp_val = round(current_price - max(2 * risk_dist, 1.0), 2)
+                tp_val = round(current_price - max(2 * risk_dist, MIN_STOP_DISTANCE * 2), 2)
                 entry_zone = (current_price, current_price)
 
-    # Validate stops
-    if signal in ("BUY","SELL"):
+    # Adjust stops if needed to guarantee minimum distance
+    if signal in ("BUY","SELL") and entry_zone:
         entry = entry_zone[0] if signal=="BUY" else entry_zone[1]
+        sl_val, tp_val = adjust_stops_to_minimum(signal, entry, sl_val, tp_val)
         if not validate_stops(signal, entry, sl_val, tp_val):
-            print(f"⚠️ Invalid stops for {signal}: SL={sl_val}, TP={tp_val}, Entry≈{entry}")
+            print(f"⚠️ Invalid stops after adjust: {signal} SL={sl_val} TP={tp_val} Entry={entry}")
             signal = "HOLD"; entry_zone = None; sl_val = None; tp_val = None
 
     return {"signal":signal,"entry_zone":entry_zone,"sl":sl_val,"tp":tp_val,"trend":trend,
