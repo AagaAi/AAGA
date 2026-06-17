@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-  <title>J.A.R.V.I.S. Trading OS</title>
+  <title>A.A.G.A AI Trading OS</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap');
 
@@ -18,7 +18,6 @@
       overflow-x: hidden;
     }
 
-    /* Animated grid background */
     body::before {
       content: "";
       position: fixed;
@@ -36,7 +35,7 @@
       100% { transform: translate(30px, 30px); }
     }
 
-    .jarvis-container {
+    .main-container {
       position: relative;
       z-index: 1;
       max-width: 1200px;
@@ -199,7 +198,6 @@
       box-shadow: 0 0 20px #00ffff66;
     }
 
-    /* Scrollbar */
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: #0a0c0f; }
     ::-webkit-scrollbar-thumb { background: #00ffff44; border-radius: 10px; }
@@ -211,26 +209,22 @@
   </style>
 </head>
 <body>
-<div class="jarvis-container">
-  <h1>⚡ J.A.R.V.I.S. Trading OS</h1>
+<div class="main-container">
+  <h1>⚡ A.A.G.A AI Trading OS</h1>
 
-  <!-- Status bar -->
   <div class="status-bar">
     <span class="status-pill" id="connectionStatus">● ONLINE</span>
     <span class="status-pill" id="lastUpdate">Last update: --</span>
     <span class="status-pill" id="marketPhase">Phase: --</span>
   </div>
 
-  <!-- Main grid -->
   <div class="grid">
-    <!-- Price & Trend -->
     <div class="card">
       <h3>💰 Spot Price</h3>
       <div class="value" id="currentPrice">$----.--</div>
       <div style="color:#a0b0c0; margin-top:5px;" id="marketTrend">--</div>
     </div>
 
-    <!-- Sweep & MSS -->
     <div class="card">
       <h3>🔄 Sweep & MSS</h3>
       <div class="sweep-details">
@@ -240,24 +234,21 @@
       </div>
     </div>
 
-    <!-- Main Decision -->
     <div class="card">
       <h3>🧠 Decision</h3>
       <div class="value" id="decisionDiv">--</div>
       <div class="probabilities" id="probabilitiesContainer"></div>
     </div>
 
-    <!-- Risk Brief -->
     <div class="card">
       <h3>📊 Risk Brief</h3>
       <div class="risk-brief" id="riskBrief">--</div>
     </div>
   </div>
 
-  <!-- Gemini AI & Agent Logs -->
   <div class="grid">
     <div class="card">
-      <h3>🤖 J.A.R.V.I.S. Insight</h3>
+      <h3>🤖 A.A.G.A Insight</h3>
       <div class="gemini-advice" id="geminiAdvice">--</div>
     </div>
     <div class="card">
@@ -266,33 +257,27 @@
     </div>
   </div>
 
-  <!-- Today's Trades -->
   <div class="card" style="margin-bottom:30px;">
     <h3>📈 Today's Trades</h3>
     <div id="tradesTable" style="overflow-x:auto;">--</div>
   </div>
 
-  <!-- Trade Reviews -->
   <div class="card">
-    <h3>🔍 Trade Reviews (J.A.R.V.I.S.)</h3>
+    <h3>🔍 Trade Reviews (A.A.G.A Gemini)</h3>
     <div id="tradeReviews">--</div>
   </div>
 </div>
 
 <script>
-  // -------------------- Data Fetching --------------------
   async function fetchAll() {
     try {
-      // 1. Master signal
       const signalRes = await fetch('/master-signal');
       const d = await signalRes.json();
 
-      // Price & Trend
       document.getElementById('currentPrice').innerText = d.current_price ? '$' + d.current_price.toFixed(2) : '$----.--';
       document.getElementById('marketTrend').innerText = d.market_trend || 'Unknown';
       document.getElementById('marketPhase').innerText = 'Phase: ' + (d.market_trend || '--');
 
-      // Sweep / MSS / FVG
       document.getElementById('sweepInfo').innerHTML = d.sweep_detected ?
         `${d.sweep_type} @ ${d.sweep_level?.toFixed(2)}` : 'No sweep';
       document.getElementById('mssInfo').innerText = d.mss || 'None';
@@ -302,14 +287,12 @@
         document.getElementById('fvgInfo').innerText = 'None';
       }
 
-      // Decision
       let decisionClass = '';
       if (d.decision === 'BUY') decisionClass = 'signal-buy';
       else if (d.decision === 'SELL') decisionClass = 'signal-sell';
       else decisionClass = 'signal-hold';
       document.getElementById('decisionDiv').innerHTML = `<span class="${decisionClass}">${d.decision}</span>`;
 
-      // Probabilities circles
       const probs = d.probabilities;
       let probHtml = '';
       for (let act of ['BUY','SELL','HOLD']) {
@@ -322,7 +305,6 @@
       }
       document.getElementById('probabilitiesContainer').innerHTML = probHtml;
 
-      // Risk Brief
       if (d.risk_brief) {
         document.getElementById('riskBrief').innerHTML = `
           Entry: $${d.risk_brief.entry}<br>
@@ -332,10 +314,8 @@
         document.getElementById('riskBrief').innerText = 'No trade';
       }
 
-      // Gemini advice
       document.getElementById('geminiAdvice').innerText = d.gemini_advice?.summary || 'Unavailable';
 
-      // 2. Agent logs
       const logRes = await fetch('/agent-log');
       const logs = await logRes.json();
       let logHtml = '';
@@ -348,7 +328,6 @@
       });
       document.getElementById('agentLogContainer').innerHTML = logHtml || 'No agent activity';
 
-      // 3. Today's trades
       const tradesRes = await fetch('/today-trades');
       const trades = await tradesRes.json();
       let tradesHtml = '<table><tr><th>Time</th><th>Signal</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th></tr>';
@@ -367,7 +346,6 @@
       tradesHtml += '</table>';
       document.getElementById('tradesTable').innerHTML = trades.length ? tradesHtml : 'No trades today';
 
-      // 4. Trade reviews
       const reviewsRes = await fetch('/trade-reviews');
       const reviews = await reviewsRes.json();
       let reviewHtml = '';
@@ -376,12 +354,11 @@
         try { gemini = JSON.parse(t.gemini_insight).summary; } catch(e) {}
         reviewHtml += `<div class="trade-review">
           <b>${t.signal}</b> @ ${t.entry} → ${t.outcome} (${t.pnl})<br/>
-          <em>${gemini || 'No J.A.R.V.I.S. review'}</em>
+          <em>${gemini || 'No A.A.G.A review'}</em>
         </div>`;
       });
       document.getElementById('tradeReviews').innerHTML = reviewHtml || 'No reviews yet';
 
-      // Update time
       document.getElementById('lastUpdate').innerText = 'Last update: ' + new Date().toLocaleTimeString();
     } catch (e) {
       console.error(e);
@@ -389,7 +366,6 @@
     }
   }
 
-  // Refresh every 30 seconds
   fetchAll();
   setInterval(fetchAll, 30000);
 </script>
