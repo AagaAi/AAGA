@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Order placement via account, not RPC connection)
+# main.py – Tradevil AGI OS (Stable Order Execution)
 import os, json, sqlite3, datetime, threading, time as _time
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -110,36 +110,40 @@ def sdk_get_price(symbol: str):
         return None
 
 # ============================================================
-# execute_trade_sync – using ACCOUNT (not RPC connection)
+# execute_trade_sync – RPC connection, asyncio.run()
 # ============================================================
 def execute_trade_sync(signal, sl, tp, lot=0.01):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
-        print("MetaApi credentials missing – cannot place order.")
+        print("MetaApi credentials missing.")
         return None
 
     async def _place():
-        account = await get_account()
-        if signal == "BUY":
-            order = await account.create_market_buy_order(
-                symbol="XAUUSD",
-                volume=lot,
-                stop_loss=sl,
-                take_profit=tp
-            )
-        else:
-            order = await account.create_market_sell_order(
-                symbol="XAUUSD",
-                volume=lot,
-                stop_loss=sl,
-                take_profit=tp
-            )
-        return order
+        account    = await get_account()
+        connection = account.get_rpc_connection()
+        await connection.connect()
+        await connection.wait_synchronized()
+        try:
+            if signal == "BUY":
+                order = await connection.create_market_buy_order(
+                    symbol="XAUUSD",
+                    volume=lot,
+                    stop_loss=sl,
+                    take_profit=tp
+                )
+            else:
+                order = await connection.create_market_sell_order(
+                    symbol="XAUUSD",
+                    volume=lot,
+                    stop_loss=sl,
+                    take_profit=tp
+                )
+            return order
+        finally:
+            await connection.close()
 
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_place())
-        loop.close()
+        # asyncio.run handles event loop cleanly (Python 3.10+)
+        result = asyncio.run(_place())
         return result
     except Exception as e:
         print(f"Order placement error: {e}")
@@ -229,7 +233,7 @@ def run_sniper_analysis():
 
     signal = "HOLD"; entry_zone = sl_val = tp_val = None
 
-    # Aligned MSS+FVG
+    # Perfect ICT: Sweep + MSS + FVG
     if latest_sweep["type"]=="sell_side" and mss=="BULLISH" and fvg and fvg["type"]=="bullish":
         signal="BUY"
         entry_zone = (fvg["zone_low"], fvg["zone_high"])
@@ -241,7 +245,7 @@ def run_sniper_analysis():
         sl_val = latest_sweep["level"]
         tp_val = round(fvg["zone_low"] - (fvg["zone_high"]-fvg["zone_low"])*2, 2)
     else:
-        # Fallback: sweep‑based entry
+        # Sweep only → aggressive entry with risk management
         sweep_level = latest_sweep["level"]
         if sweep_level and not (isinstance(sweep_level, float) and pd.isna(sweep_level)) and sweep_level > 0:
             if latest_sweep["type"] == "sell_side":
@@ -400,21 +404,22 @@ def master_signal():
         entry = sniper["entry_zone"][0] if decision=="BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry":round(entry,2),"sl":sniper["sl"],"tp":sniper["tp"]}
 
+        # Journal
         con = sqlite3.connect(DB_PATH)
         con.execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
                     (now.isoformat(),"XAUUSD",decision,risk_brief["entry"],risk_brief["sl"],risk_brief["tp"],
                      strategy["name"],gemini_advice.get("summary","")))
         con.commit(); con.close()
 
-        # ── EXECUTE TRADE (account‑based) ──
+        # Live Order
         order_result = execute_trade_sync(
             signal=decision,
             sl=risk_brief["sl"],
             tp=risk_brief["tp"],
             lot=0.01
         )
-        if order_result: print(f"✅ MT5 Order placed: {order_result}")
-        else: print("❌ Order placement failed")
+        if order_result: print(f"✅ MT5 Order placed")
+        else: print("❌ Order placement failed (check MetaApi connection)")
 
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
