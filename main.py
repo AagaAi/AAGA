@@ -1,4 +1,4 @@
-# main.py – Tradevil AGI OS (Autonomous Background Scheduler)
+# main.py – Tradevil AGI OS (24/7 Autonomous, 1-minute loop)
 import os, json, sqlite3, datetime, time as _time, asyncio
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -17,10 +17,7 @@ METAAPI_TOKEN      = os.environ.get("METAAPI_TOKEN", "")
 METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 
 app = FastAPI(title="Tradevil AGI OS")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ============================================================
 # SINGLE shared MetaApi instance + account (async)
@@ -81,7 +78,7 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
     finally: await connection.close()
 
 # ============================================================
-# Sniper Logic (unchanged)
+# Sniper Logic
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -175,7 +172,7 @@ async def run_sniper_analysis():
             "mss":mss,"fvg":fvg,"current_price":current_price}
 
 # ============================================================
-# Outcome checker (no background thread)
+# Outcome checker
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
@@ -195,19 +192,16 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Autonomous Trading Loop (Background Async Task)
+# Autonomous Trading Loop (background, every 60 seconds)
 # ============================================================
-AUTONOMOUS_INTERVAL_SEC = 300  # 5 minutes
+AUTONOMOUS_INTERVAL_SEC = 60  # 1 minute
 
 async def autonomous_trading_loop():
     while True:
         try:
-            # 1. Update existing trades
             await update_pending_trades()
-            # 2. Run sniper analysis
             sniper = await run_sniper_analysis()
             if sniper["signal"] in ("BUY", "SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
-                # Check if an open trade of same direction already exists
                 con = sqlite3.connect(DB_PATH)
                 existing = con.execute(
                     "SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?",
@@ -217,7 +211,6 @@ async def autonomous_trading_loop():
                 if existing == 0:
                     entry = sniper["entry_zone"][0] if sniper["signal"] == "BUY" else sniper["entry_zone"][1]
                     risk_brief = {"entry": round(entry,2), "sl": sniper["sl"], "tp": sniper["tp"]}
-                    # Journal
                     con = sqlite3.connect(DB_PATH)
                     con.execute(
                         "INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
@@ -225,36 +218,36 @@ async def autonomous_trading_loop():
                          risk_brief["entry"], risk_brief["sl"], risk_brief["tp"],
                          "default", "Autonomous"))
                     con.commit(); con.close()
-                    # Execute trade
                     order = await execute_trade_async(sniper["signal"], sniper["sl"], sniper["tp"], lot=0.01)
-                    if order:
-                        print(f"✅ Auto trade placed: {sniper['signal']}")
-                    else:
-                        print("❌ Auto trade order failed")
+                    if order: print(f"✅ Auto trade: {sniper['signal']}")
+                    else: print("❌ Auto trade failed")
                 else:
-                    print("⏩ Trade skipped (same direction open trade exists)")
+                    print("⏩ Same direction open trade exists, skipping")
         except Exception as e:
             print(f"Autonomous loop error: {e}")
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
-# Start background task on app startup
 @app.on_event("startup")
-async def startup_event():
+async def startup():
     asyncio.create_task(autonomous_trading_loop())
 
 # ============================================================
-# Routes (for dashboard monitoring)
+# Routes
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
 
+@app.get("/health")
+async def health():
+    # Lightweight health check for UptimeRobot — no heavy processing
+    return {"status": "ok", "autonomous_loop": "active"}
+
 @app.get("/master-signal")
 async def master_signal():
-    # This can still be used for manual refresh, but will also just return the latest sniper state.
-    sniper        = await run_sniper_analysis()
-    mtf           = {"htf_bias":"Bullish","confluence_score":6}
-    now           = datetime.datetime.utcnow()
+    sniper = await run_sniper_analysis()
+    mtf = {"htf_bias":"Bullish","confluence_score":6}
+    now = datetime.datetime.utcnow()
     gemini_advice = {"summary":"Gemini throttled"}
 
     if sniper["signal"] == "BUY": tech_probs = {"BUY":0.9,"SELL":0.0,"HOLD":0.1}
@@ -264,10 +257,10 @@ async def master_signal():
     news_probs  = {"BUY":0.5,"SELL":0.5,"HOLD":0.0}
     risk_probs  = {"BUY":0.33,"SELL":0.33,"HOLD":0.34}
     strat_probs = {"BUY":0.5,"SELL":0.5,"HOLD":0.0}
-    w           = {"tech":0.4,"news":0.2,"risk":0.2,"strategy":0.2}
+    w = {"tech":0.4,"news":0.2,"risk":0.2,"strategy":0.2}
 
     final_probs = {
-        "BUY":  tech_probs["BUY"] *w["tech"] + news_probs["BUY"] *w["news"] + risk_probs["BUY"] *w["risk"] + strat_probs["BUY"] *w["strategy"],
+        "BUY":  tech_probs["BUY"]*w["tech"] + news_probs["BUY"]*w["news"] + risk_probs["BUY"]*w["risk"] + strat_probs["BUY"]*w["strategy"],
         "SELL": tech_probs["SELL"]*w["tech"] + news_probs["SELL"]*w["news"] + risk_probs["SELL"]*w["risk"] + strat_probs["SELL"]*w["strategy"],
         "HOLD": tech_probs["HOLD"]*w["tech"] + news_probs["HOLD"]*w["news"] + risk_probs["HOLD"]*w["risk"] + strat_probs["HOLD"]*w["strategy"],
     }
@@ -278,7 +271,6 @@ async def master_signal():
         entry = sniper["entry_zone"][0] if decision=="BUY" else sniper["entry_zone"][1]
         risk_brief = {"entry":round(entry,2),"sl":sniper["sl"],"tp":sniper["tp"]}
 
-    # Agent logs
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag, probs in [("Tech",tech_probs),("News",news_probs),("Risk",risk_probs),("Strategy",strat_probs)]:
@@ -295,20 +287,20 @@ async def master_signal():
 
 @app.get("/agent-log")
 def agent_log():
-    con  = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH)
     rows = con.execute("SELECT hour, agent, action, prob, details FROM agent_log WHERE hour >= datetime('now','-1 hour') ORDER BY id DESC LIMIT 20").fetchall()
     con.close()
     return [{"hour":r[0],"agent":r[1],"action":r[2],"prob":r[3],"details":r[4]} for r in rows]
 
 @app.get("/today-trades")
 def today_trades():
-    con  = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH)
     rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
     con.close()
     return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7]} for r in rows]
 
 # ============================================================
-# Stub Agents (unchanged)
+# Stub Agents
 # ============================================================
 def run_news_analysis(): return {"prob_buy":0.5,"prob_sell":0.5,"prob_hold":0.0}
 class RiskManager: pass
