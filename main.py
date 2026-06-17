@@ -1,5 +1,5 @@
-# main.py – Tradevil AGI OS (Async – No asyncio.run)
-import os, json, sqlite3, datetime, threading, time as _time
+# main.py – Tradevil AGI OS (Async, No background checker thread)
+import os, json, sqlite3, datetime, time as _time
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -115,7 +115,7 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
         await connection.close()
 
 # ============================================================
-# Async Sniper Logic
+# Sniper Logic (same, now async)
 # ============================================================
 def detect_swing_points(candles, lookback=3):
     highs, lows = [], []
@@ -229,42 +229,29 @@ async def run_sniper_analysis():
             "mss":mss,"fvg":fvg,"current_price":current_price}
 
 # ============================================================
-# Paper Trade Checker (background thread) – uses sync wrappers with new loop
+# Outcome check (called inside master_signal)
 # ============================================================
-def check_open_trades():
-    while True:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            raw = loop.run_until_complete(sdk_get_candles_async("XAUUSD", "1m", 2))
-            if raw: current_price = raw[-1]["close"]
-            else:
-                current_price = loop.run_until_complete(sdk_get_price_async("XAUUSD"))
-            loop.close()
-
-            if current_price is None:
-                _time.sleep(30); continue
-
-            con = sqlite3.connect(DB_PATH)
-            trades = con.execute(
-                "SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL"
-            ).fetchall()
-            for tid, pair, sig, entry, sl, tp in trades:
-                if entry is None: continue
-                outcome = pnl = None
-                if sig == "BUY":
-                    if current_price <= sl: outcome, pnl = "LOSS", round((sl-entry)*100,2)
-                    elif current_price >= tp: outcome, pnl = "WIN",  round((tp-entry)*100,2)
-                else:
-                    if current_price >= sl: outcome, pnl = "LOSS", round((entry-sl)*100,2)
-                    elif current_price <= tp: outcome, pnl = "WIN",  round((entry-tp)*100,2)
-                if outcome:
-                    con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?", (outcome, pnl, tid))
-                    con.commit()
-            con.close()
-        except Exception as e:
-            print(f"Checker error: {e}")
-        _time.sleep(30)
+async def update_pending_trades():
+    price = await sdk_get_price_async("XAUUSD")
+    if price is None:
+        return
+    con = sqlite3.connect(DB_PATH)
+    trades = con.execute(
+        "SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL"
+    ).fetchall()
+    for tid, pair, sig, entry, sl, tp in trades:
+        if entry is None: continue
+        outcome = pnl = None
+        if sig == "BUY":
+            if price <= sl: outcome, pnl = "LOSS", round((sl - entry) * 100, 2)
+            elif price >= tp: outcome, pnl = "WIN",  round((tp - entry) * 100, 2)
+        else:
+            if price >= sl: outcome, pnl = "LOSS", round((entry - sl) * 100, 2)
+            elif price <= tp: outcome, pnl = "WIN",  round((entry - tp) * 100, 2)
+        if outcome:
+            con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?", (outcome, pnl, tid))
+    con.commit()
+    con.close()
 
 # ============================================================
 # Stub Agents (unchanged)
@@ -317,7 +304,7 @@ def init_db():
     con.commit()
     con.close()
 init_db()
-threading.Thread(target=check_open_trades, daemon=True).start()
+# No background thread – outcome check done in master_signal
 
 # ============================================================
 # Async Routes
@@ -342,6 +329,9 @@ async def test_price():
 
 @app.get("/master-signal")
 async def master_signal():
+    # Check outcome of existing trades first
+    await update_pending_trades()
+
     sniper        = await run_sniper_analysis()
     mtf           = {"htf_bias":"Bullish","confluence_score":6}
     strategy      = strategy_selector.select("XAUUSD", mtf)
@@ -379,7 +369,7 @@ async def master_signal():
                      strategy["name"],gemini_advice.get("summary","")))
         con.commit(); con.close()
 
-        # Live Order (async)
+        # Live Order
         order_result = await execute_trade_async(
             signal=decision,
             sl=risk_brief["sl"],
@@ -389,7 +379,7 @@ async def master_signal():
         if order_result: print("✅ MT5 Order placed")
         else: print("❌ Order placement failed")
 
-    # Agent logs (sync is fine)
+    # Agent logs
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for ag, probs in [("Tech",tech_probs),("News",news_probs),("Risk",risk_probs),("Strategy",strat_probs)]:
