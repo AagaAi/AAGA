@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Quota‑Safe Gemini, Trading Always Works)
+# main.py – A.A.G.A AI (Fully Autonomous, No Gemini Quota Issues)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,10 +11,10 @@ from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
-from agents.news_agent import NewsSentimentAgent
+from agents.news_agent import NewsSentimentAgent   # <-- Keyword-only news (no Gemini)
 from backtest import run_comparison as compare_strategies
 
-# Strategy factory only imported if Gemini available
+# Strategy factory only if Gemini is available
 strategy_factory = None
 
 # ---------- Config ----------
@@ -37,7 +37,7 @@ ai_strat_instance = RandomForestStrategy()
 active_strategies = [ema_dmi_strat, ai_strat_instance]
 
 # ---------- Agents ----------
-news_agent = NewsSentimentAgent(gemini_analyst)
+news_agent = NewsSentimentAgent()   # No Gemini needed -> NO QUOTA ERRORS
 
 def run_news_analysis():
     result = news_agent.analyze()
@@ -203,7 +203,7 @@ async def nightly_tasks():
             ai_strat_instance.trained = True
             print("✅ RandomForest retrained")
 
-        # Update master agent performance (no Gemini needed)
+        # Update master agent performance
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, COUNT(*) as total,
@@ -436,7 +436,7 @@ async def weekly_strategy_select():
         except Exception as e: print(f"Weekly strategy select error: {e}")
 
 # ============================================================
-# Routes (unchanged)
+# Routes
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
