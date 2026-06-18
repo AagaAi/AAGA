@@ -1,6 +1,6 @@
 # agents/gemini_agent.py
 import os, json, time as _time
-import google.generativeai as genai
+from google import genai
 from typing import Optional
 
 class GeminiAnalyst:
@@ -13,8 +13,8 @@ class GeminiAnalyst:
             self.error = "GEMINI_API_KEY not set"
             return
         try:
-            genai.configure(api_key=key)
-            self.model = genai.GenerativeModel("gemini-2.0-flash")
+            self.client = genai.Client(api_key=key)
+            self.model = "gemini-2.0-flash"
             self.available = True
         except Exception as e:
             self.error = str(e)
@@ -26,7 +26,10 @@ class GeminiAnalyst:
             return None
         self.last_call = now
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt
+            )
             return response.text
         except Exception as e:
             print(f"Gemini API error: {e}")
