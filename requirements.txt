@@ -7,6 +7,5 @@ pydantic
 metaapi-cloud-sdk
 aiohttp
 google-generativeai
-tensorflow
 scikit-learn
 matplotlib
