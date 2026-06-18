@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Phase 2: Self-Learning + Dynamic Lot)
+# main.py – A.A.G.A AI (Phase 3: Dynamic Strategy Generator)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,6 +11,7 @@ from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
+from agents.strategy_factory import StrategyFactory
 from backtest import run_comparison as compare_strategies
 
 # ---------- Config ----------
@@ -30,7 +31,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 ema_dmi_strat = EmaDmiStrategy(config.get("parameters", {}))
 ai_strat_instance = RandomForestStrategy()
-all_strategies = [ema_dmi_strat, ai_strat_instance]
+# List of active strategies – new ones added here
+active_strategies = [ema_dmi_strat, ai_strat_instance]
 
 # ---------- Agents ----------
 def run_news_analysis():
@@ -73,19 +75,18 @@ class RiskManager:
         self.balance += pnl
 
     def calculate_lot(self, entry, sl):
-        if sl is None or entry is None:
-            return 0.01
+        if sl is None or entry is None: return 0.01
         risk_amount = self.balance * self.risk_per_trade
         sl_distance = abs(entry - sl)
-        if sl_distance < 0.5:
-            sl_distance = 0.5
-        lot = risk_amount / (sl_distance * 100)   # 100 oz per lot for XAUUSD
+        if sl_distance < 0.5: sl_distance = 0.5
+        lot = risk_amount / (sl_distance * 100)
         lot = max(0.01, round(lot, 2))
         return lot
 
 risk_manager = RiskManager()
-master_agent = MasterAgent(all_strategies, risk_manager.evaluate, run_news_analysis)
+master_agent = MasterAgent(active_strategies, risk_manager.evaluate, run_news_analysis)
 trade_memory = TradeMemory(DB_PATH)
+strategy_factory = StrategyFactory(gemini_analyst)
 
 # ============================================================
 # MetaApi singleton (async) – unchanged
@@ -140,7 +141,7 @@ async def execute_trade_async(signal, sl, tp, lot):
     finally: await connection.close()
 
 # ============================================================
-# Multi-Strategy Signal Generator (unchanged)
+# Multi-Strategy Signal Generator (uses active_strategies)
 # ============================================================
 MIN_STOP_DISTANCE = 1.10
 
@@ -156,13 +157,13 @@ async def run_all_strategies():
     opens  = [c['open'] for c in raw1m]
     ohlc = {'highs': highs, 'lows': lows, 'closes': closes, 'opens': opens}
     signals = []
-    for strat in all_strategies:
+    for strat in active_strategies:
         sig = await get_strategy_signal(strat, ohlc)
         signals.append((strat, sig))
     return ohlc, signals
 
 # ============================================================
-# Outcome checker (adds experience to memory)
+# Outcome checker (adds experience)
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
@@ -182,32 +183,31 @@ async def update_pending_trades():
             con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?", (outcome, pnl, tid))
             if outcome in ("WIN","LOSS"):
                 risk_manager.update_pnl(pnl)
-                # ---- Add experience to memory ----
                 action_map = {"BUY": 0, "SELL": 1, "HOLD": 2}
                 features = [entry/2000, sl/2000, tp/2000, abs(entry-sl)/10, abs(tp-entry)/10]
                 trade_memory.add_experience({
                     "features": features,
                     "action": action_map.get(sig, 2),
-                    "reward": pnl / 100   # scaled reward
+                    "reward": pnl / 100
                 })
     con.commit(); con.close()
 
 # ============================================================
-# Nightly Gemini + Retrain RandomForest (Phase 2)
+# Nightly: Gemini analysis, retrain, and strategy generation
 # ============================================================
-async def nightly_analysis_and_retrain():
+async def nightly_tasks():
     while True:
         now = datetime.datetime.utcnow()
         next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
-        # --- Retrain RandomForest from experiences ---
+        # 1. Retrain RandomForest
         if trade_memory.retrain_model(ai_strat_instance.model):
             ai_strat_instance.trained = True
-            print("✅ RandomForest retrained with new experiences")
+            print("✅ RandomForest retrained")
 
-        # --- Update Master Agent performance ---
+        # 2. Update master agent performance
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, COUNT(*) as total,
@@ -222,7 +222,7 @@ async def nightly_analysis_and_retrain():
             win_rate = wins / total if total > 0 else 0.5
             master_agent.update_performance(name, win_rate)
 
-        # --- Gemini daily analysis (unchanged) ---
+        # 3. Gemini daily analysis and parameter tuning
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, id, signal, entry, sl, tp, outcome, pnl, timestamp
@@ -250,13 +250,50 @@ async def nightly_analysis_and_retrain():
                 con.commit(); con.close()
                 suggestions = daily_insight.get("parameter_suggestions", {})
                 if suggestions:
-                    for strat in all_strategies:
+                    for strat in active_strategies:
                         if strat.name == strat_name:
                             for key, val in suggestions.items():
                                 if hasattr(strat, key): setattr(strat, key, val)
                             print(f"✅ {strat_name} self‑optimized: {suggestions}")
-        else:
-            print("ℹ️ No completed trades yesterday for any strategy.")
+
+        # 4. Generate new strategy if enabled
+        try:
+            # Get market context from last 1h
+            candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
+            if candles_1h and len(candles_1h) >= 50:
+                closes_1h = [c['close'] for c in candles_1h]
+                ema50_1h = pd.Series(closes_1h).ewm(span=50).mean().iloc[-1]
+                market_context = {
+                    "current_price": closes_1h[-1],
+                    "trend": "UPTREND" if closes_1h[-1] > ema50_1h else "DOWNTREND",
+                    "volatility": round(pd.Series([c['high']-c['low'] for c in candles_1h[-14:]]).mean(), 2)
+                }
+            else:
+                market_context = {"current_price": 0, "trend": "Unknown", "volatility": 0}
+
+            # Get last 10 trades
+            con = sqlite3.connect(DB_PATH)
+            recent = con.execute("SELECT signal, entry, sl, tp, outcome, pnl FROM trade_journal ORDER BY id DESC LIMIT 10").fetchall()
+            con.close()
+            recent_trades = [{"signal": r[0], "entry": r[1], "sl": r[2], "tp": r[3], "outcome": r[4], "pnl": r[5]} for r in recent]
+
+            new_params = strategy_factory.generate_strategy_params(market_context, recent_trades)
+            if new_params:
+                new_strategy = strategy_factory.create_strategy_from_params(new_params)
+                if new_strategy:
+                    # Add to active list if not already present
+                    if not any(s.name == new_strategy.name for s in active_strategies):
+                        active_strategies.append(new_strategy)
+                        master_agent.strategies = active_strategies
+                        print(f"🌟 New strategy '{new_strategy.name}' added to active strategies!")
+                        # Log event
+                        hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
+                        con = sqlite3.connect(DB_PATH)
+                        con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                                    (hour, "A.A.G.A Factory", "NEW_STRATEGY", 1.0, json.dumps(new_params)))
+                        con.commit(); con.close()
+        except Exception as e:
+            print(f"Strategy generation error: {e}")
 
 # ============================================================
 # Autonomous Trading Loop (Master Decision + Dynamic Lot)
@@ -284,7 +321,6 @@ async def autonomous_trading_loop():
                 await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
                 continue
 
-            # Prepare signals for master agent
             signal_dicts = []
             for strat, sig in strategy_signals:
                 signal_dicts.append({
@@ -311,7 +347,6 @@ async def autonomous_trading_loop():
                 continue
 
             entry = entry_zone[0] if decision_signal == "BUY" else entry_zone[1]
-            # Stop validation
             if decision_signal == "BUY":
                 if sl > entry - MIN_STOP_DISTANCE or tp < entry + MIN_STOP_DISTANCE:
                     print("⚠️ Invalid stops, skipping")
@@ -321,12 +356,10 @@ async def autonomous_trading_loop():
                     print("⚠️ Invalid stops, skipping")
                     continue
 
-            # Check existing open trade same direction
             con = sqlite3.connect(DB_PATH)
             existing = con.execute("SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?", (decision_signal,)).fetchone()[0]
             con.close()
             if existing == 0:
-                # Dynamic lot size
                 lot = risk_manager.calculate_lot(entry, sl)
                 risk_brief = {"entry": round(entry,2), "sl": sl, "tp": tp}
                 strat_used = final_decision.get("strategy_used", "Master")
@@ -349,7 +382,7 @@ async def autonomous_trading_loop():
 async def startup():
     asyncio.create_task(keep_alive_task())
     asyncio.create_task(autonomous_trading_loop())
-    asyncio.create_task(nightly_analysis_and_retrain())
+    asyncio.create_task(nightly_tasks())
     asyncio.create_task(weekly_strategy_select())
 
 # ============================================================
@@ -415,7 +448,7 @@ def dashboard():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "autonomous_loop": "active", "master_agent": True}
+    return {"status": "ok", "autonomous_loop": "active", "strategies": [s.name for s in active_strategies]}
 
 @app.get("/master-signal")
 async def master_signal():
