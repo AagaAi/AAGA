@@ -267,7 +267,14 @@
     <div id="tradeReviews">--</div>
   </div>
 
-  <!-- Strategy Comparison Card -->
+  <!-- Per-Strategy Daily Stats -->
+  <div class="card" style="margin-bottom:30px;">
+    <h3>📊 Today's Strategy Performance</h3>
+    <div id="dailyStrategyStats">--</div>
+    <button onclick="loadDailyStrategyStats()">Refresh Daily Stats</button>
+  </div>
+
+  <!-- Monthly Backtest Comparison -->
   <div class="card" style="margin-bottom:30px;">
     <h3>📊 Strategy Performance (Last Month Backtest)</h3>
     <div id="strategyCompare">--</div>
@@ -341,12 +348,13 @@
       // 3. Today's trades
       const tradesRes = await fetch('/today-trades');
       const trades = await tradesRes.json();
-      let tradesHtml = '<table><tr><th>Time</th><th>Signal</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th></tr>';
+      let tradesHtml = '<table><tr><th>Time</th><th>Signal</th><th>Strategy</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th></tr>';
       trades.forEach(t => {
         let cls = (t.pnl > 0) ? 'profit' : (t.pnl < 0) ? 'loss' : '';
         tradesHtml += `<tr>
           <td>${t.timestamp ? t.timestamp.substr(11,8) : ''}</td>
           <td>${t.signal}</td>
+          <td>${t.strategy || ''}</td>
           <td>${t.entry ? '$'+t.entry : ''}</td>
           <td>${t.sl ? '$'+t.sl : ''}</td>
           <td>${t.tp ? '$'+t.tp : ''}</td>
@@ -378,7 +386,26 @@
     }
   }
 
-  // Strategy comparison loader
+  // -------------------- Strategy Performance --------------------
+  async function loadDailyStrategyStats() {
+    const container = document.getElementById('dailyStrategyStats');
+    container.innerHTML = 'Loading...';
+    try {
+      const res = await fetch('/strategy-performance');
+      const data = await res.json();
+      let html = '';
+      for (const [name, stats] of Object.entries(data)) {
+        html += `<div class="trade-review">
+          <b>${name}</b>: Trades ${stats.total_trades}, Wins ${stats.wins}, Losses ${stats.losses}, Win Rate ${stats.win_rate}%, P&L $${stats.pnl}
+        </div>`;
+      }
+      container.innerHTML = html || 'No completed trades today';
+    } catch(e) {
+      container.innerHTML = '<span style="color:#ff4466;">Failed to load daily stats</span>';
+      console.error(e);
+    }
+  }
+
   async function loadStrategyCompare() {
     const container = document.getElementById('strategyCompare');
     container.innerHTML = 'Loading...';
@@ -405,10 +432,12 @@
     }
   }
 
-  // Initial load
+  // Initial load and refresh
   fetchAll();
+  loadDailyStrategyStats();
   loadStrategyCompare();
   setInterval(fetchAll, 30000);
+  setInterval(loadDailyStrategyStats, 60000);
 </script>
 </body>
 </html>
