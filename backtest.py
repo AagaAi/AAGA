@@ -23,8 +23,6 @@ async def fetch_last_month_candles(symbol="XAUUSD", timeframe="1m"):
     return candles
 
 def backtest_strategy(strategy, candles):
-    # ... (same logic as before, unchanged)
-    trades = []
     balance = 10000.0
     position = 0
     entry_price = 0.0
@@ -94,10 +92,9 @@ async def run_comparison():
     except Exception as e:
         return {"error": f"Data fetch failed: {str(e)}"}
 
-    # Initialize strategies
     ema_dmi = EmaDmiStrategy()
     rf_strat = RandomForestStrategy()
-    # Quick dummy training for RF so it doesn't just fallback to HOLD
+    # Quick train RF with dummy data so it doesn't just HOLD
     dummy_trades = [{"signal": "BUY", "entry": 2000, "sl": 1998, "tp": 2005},
                     {"signal": "SELL", "entry": 2005, "sl": 2007, "tp": 2000}]
     rf_strat.train_from_trades(dummy_trades)
