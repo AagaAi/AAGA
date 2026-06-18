@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Phase 5: Gemini News Sentiment)
+# main.py – A.A.G.A AI (Quota‑Safe Gemini, Trading Always Works)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,9 +11,11 @@ from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
-from agents.strategy_factory import StrategyFactory
-from agents.news_agent import NewsSentimentAgent       # <-- new
+from agents.news_agent import NewsSentimentAgent
 from backtest import run_comparison as compare_strategies
+
+# Strategy factory only imported if Gemini available
+strategy_factory = None
 
 # ---------- Config ----------
 CONFIG_PATH = "config.json"
@@ -35,10 +37,9 @@ ai_strat_instance = RandomForestStrategy()
 active_strategies = [ema_dmi_strat, ai_strat_instance]
 
 # ---------- Agents ----------
-news_agent = NewsSentimentAgent(gemini_analyst)       # <-- create instance
+news_agent = NewsSentimentAgent(gemini_analyst)
 
 def run_news_analysis():
-    """Return dict with prob_hold for Master Agent."""
     result = news_agent.analyze()
     return {"prob_hold": result.get("prob_hold", 0.0), "full": result}
 
@@ -68,10 +69,20 @@ class RiskManager:
         return lot
 
 risk_manager = RiskManager()
-# Master Agent now receives the new news function
 master_agent = MasterAgent(active_strategies, risk_manager.evaluate, run_news_analysis)
 trade_memory = TradeMemory(DB_PATH)
-strategy_factory = StrategyFactory(gemini_analyst)
+
+# Only create strategy factory if Gemini is available
+if gemini_analyst.available:
+    try:
+        from agents.strategy_factory import StrategyFactory
+        strategy_factory = StrategyFactory(gemini_analyst)
+        print("✅ Strategy Factory enabled")
+    except Exception as e:
+        print(f"Strategy Factory init error: {e}")
+        strategy_factory = None
+else:
+    print("⚠️ Gemini unavailable – Strategy Factory disabled")
 
 # ============================================================
 # MetaApi singleton (async) – unchanged
@@ -178,7 +189,7 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly tasks (unchanged: retrain, Gemini analysis, factory)
+# Nightly tasks (Gemini‑optional)
 # ============================================================
 async def nightly_tasks():
     while True:
@@ -187,12 +198,12 @@ async def nightly_tasks():
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
-        # Retrain RandomForest
+        # Retrain RandomForest (no Gemini needed)
         if trade_memory.retrain_model(ai_strat_instance.model):
             ai_strat_instance.trained = True
             print("✅ RandomForest retrained")
 
-        # Update master agent performance
+        # Update master agent performance (no Gemini needed)
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, COUNT(*) as total,
@@ -207,77 +218,81 @@ async def nightly_tasks():
             win_rate = wins / total if total > 0 else 0.5
             master_agent.update_performance(name, win_rate)
 
-        # Gemini daily analysis and parameter tuning
-        con = sqlite3.connect(DB_PATH)
-        rows = con.execute("""
-            SELECT strategy_used, id, signal, entry, sl, tp, outcome, pnl, timestamp
-            FROM trade_journal
-            WHERE date(timestamp) = date('now', '-1 day') AND outcome IS NOT NULL
-            ORDER BY strategy_used, timestamp
-        """).fetchall()
-        con.close()
-        if rows:
-            from collections import defaultdict
-            grouped = defaultdict(list)
-            for r in rows:
-                strat_name, tid, sig, entry, sl, tp, outc, pnl, ts = r
-                grouped[strat_name].append({
-                    "id": tid, "signal": sig, "entry": entry, "sl": sl, "tp": tp,
-                    "outcome": outc, "pnl": pnl, "timestamp": ts
-                })
-            for strat_name, trades in grouped.items():
-                daily_insight = gemini_analyst.analyze_daily_trades(trades)
-                print(f"📊 {strat_name} Nightly Analysis: {daily_insight.get('summary', 'No insight')}")
-                hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
-                con = sqlite3.connect(DB_PATH)
-                con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                            (hour, f"A.A.G.A Gemini ({strat_name})", "DAILY_REVIEW", 1.0, json.dumps(daily_insight)))
-                con.commit(); con.close()
-                suggestions = daily_insight.get("parameter_suggestions", {})
-                if suggestions:
-                    for strat in active_strategies:
-                        if strat.name == strat_name:
-                            for key, val in suggestions.items():
-                                if hasattr(strat, key): setattr(strat, key, val)
-                            print(f"✅ {strat_name} self‑optimized: {suggestions}")
-
-        # Strategy factory (generate new strategy)
-        try:
-            candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
-            if candles_1h and len(candles_1h) >= 50:
-                closes_1h = [c['close'] for c in candles_1h]
-                ema50_1h = pd.Series(closes_1h).ewm(span=50).mean().iloc[-1]
-                market_context = {
-                    "current_price": closes_1h[-1],
-                    "trend": "UPTREND" if closes_1h[-1] > ema50_1h else "DOWNTREND",
-                    "volatility": round(pd.Series([c['high']-c['low'] for c in candles_1h[-14:]]).mean(), 2)
-                }
-            else:
-                market_context = {"current_price": 0, "trend": "Unknown", "volatility": 0}
-
+        # Gemini daily analysis (skip if unavailable)
+        if gemini_analyst.available and gemini_analyst.disabled_until <= _time.time():
             con = sqlite3.connect(DB_PATH)
-            recent = con.execute("SELECT signal, entry, sl, tp, outcome, pnl FROM trade_journal ORDER BY id DESC LIMIT 10").fetchall()
+            rows = con.execute("""
+                SELECT strategy_used, id, signal, entry, sl, tp, outcome, pnl, timestamp
+                FROM trade_journal
+                WHERE date(timestamp) = date('now', '-1 day') AND outcome IS NOT NULL
+                ORDER BY strategy_used, timestamp
+            """).fetchall()
             con.close()
-            recent_trades = [{"signal": r[0], "entry": r[1], "sl": r[2], "tp": r[3], "outcome": r[4], "pnl": r[5]} for r in recent]
+            if rows:
+                from collections import defaultdict
+                grouped = defaultdict(list)
+                for r in rows:
+                    strat_name, tid, sig, entry, sl, tp, outc, pnl, ts = r
+                    grouped[strat_name].append({
+                        "id": tid, "signal": sig, "entry": entry, "sl": sl, "tp": tp,
+                        "outcome": outc, "pnl": pnl, "timestamp": ts
+                    })
+                for strat_name, trades in grouped.items():
+                    daily_insight = gemini_analyst.analyze_daily_trades(trades)
+                    print(f"📊 {strat_name} Nightly Analysis: {daily_insight.get('summary', 'No insight')}")
+                    hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
+                    con = sqlite3.connect(DB_PATH)
+                    con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                                (hour, f"A.A.G.A Gemini ({strat_name})", "DAILY_REVIEW", 1.0, json.dumps(daily_insight)))
+                    con.commit(); con.close()
+                    suggestions = daily_insight.get("parameter_suggestions", {})
+                    if suggestions:
+                        for strat in active_strategies:
+                            if strat.name == strat_name:
+                                for key, val in suggestions.items():
+                                    if hasattr(strat, key): setattr(strat, key, val)
+                                print(f"✅ {strat_name} self‑optimized: {suggestions}")
+        else:
+            print("ℹ️ Gemini unavailable – skipping nightly analysis")
 
-            new_params = strategy_factory.generate_strategy_params(market_context, recent_trades)
-            if new_params:
-                new_strategy = strategy_factory.create_strategy_from_params(new_params)
-                if new_strategy:
-                    if not any(s.name == new_strategy.name for s in active_strategies):
-                        active_strategies.append(new_strategy)
-                        master_agent.strategies = active_strategies
-                        print(f"🌟 New strategy '{new_strategy.name}' added to active strategies!")
-                        hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
-                        con = sqlite3.connect(DB_PATH)
-                        con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                                    (hour, "A.A.G.A Factory", "NEW_STRATEGY", 1.0, json.dumps(new_params)))
-                        con.commit(); con.close()
-        except Exception as e:
-            print(f"Strategy generation error: {e}")
+        # Strategy factory (only if available)
+        if strategy_factory and gemini_analyst.available and gemini_analyst.disabled_until <= _time.time():
+            try:
+                candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
+                if candles_1h and len(candles_1h) >= 50:
+                    closes_1h = [c['close'] for c in candles_1h]
+                    ema50_1h = pd.Series(closes_1h).ewm(span=50).mean().iloc[-1]
+                    market_context = {
+                        "current_price": closes_1h[-1],
+                        "trend": "UPTREND" if closes_1h[-1] > ema50_1h else "DOWNTREND",
+                        "volatility": round(pd.Series([c['high']-c['low'] for c in candles_1h[-14:]]).mean(), 2)
+                    }
+                else:
+                    market_context = {"current_price": 0, "trend": "Unknown", "volatility": 0}
+
+                con = sqlite3.connect(DB_PATH)
+                recent = con.execute("SELECT signal, entry, sl, tp, outcome, pnl FROM trade_journal ORDER BY id DESC LIMIT 10").fetchall()
+                con.close()
+                recent_trades = [{"signal": r[0], "entry": r[1], "sl": r[2], "tp": r[3], "outcome": r[4], "pnl": r[5]} for r in recent]
+
+                new_params = strategy_factory.generate_strategy_params(market_context, recent_trades)
+                if new_params:
+                    new_strategy = strategy_factory.create_strategy_from_params(new_params)
+                    if new_strategy:
+                        if not any(s.name == new_strategy.name for s in active_strategies):
+                            active_strategies.append(new_strategy)
+                            master_agent.strategies = active_strategies
+                            print(f"🌟 New strategy '{new_strategy.name}' added!")
+                            hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
+                            con = sqlite3.connect(DB_PATH)
+                            con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                                        (hour, "A.A.G.A Factory", "NEW_STRATEGY", 1.0, json.dumps(new_params)))
+                            con.commit(); con.close()
+            except Exception as e:
+                print(f"Strategy generation error: {e}")
 
 # ============================================================
-# Autonomous Trading Loop (unchanged, uses new news via master)
+# Autonomous Trading Loop (unchanged – no Gemini dependency)
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -421,7 +436,7 @@ async def weekly_strategy_select():
         except Exception as e: print(f"Weekly strategy select error: {e}")
 
 # ============================================================
-# Routes (including news sentiment endpoint)
+# Routes (unchanged)
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -429,7 +444,7 @@ def dashboard():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "autonomous_loop": "active", "strategies": [s.name for s in active_strategies]}
+    return {"status": "ok", "autonomous_loop": "active", "strategies": [s.name for s in active_strategies], "gemini_available": gemini_analyst.available and gemini_analyst.disabled_until <= _time.time()}
 
 @app.get("/master-signal")
 async def master_signal():
@@ -464,7 +479,6 @@ async def master_signal():
         entry = master_decision["entry_zone"][0] if master_decision["signal"]=="BUY" else master_decision["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": master_decision["sl"], "tp": master_decision["tp"]}
 
-    # Include news sentiment in response
     news_result = news_agent.analyze()
     now = datetime.datetime.utcnow()
     hour = now.strftime("%Y-%m-%d %H:00")
@@ -475,7 +489,6 @@ async def master_signal():
                      (hour, f"A.A.G.A {s['name']}", act, prob, json.dumps(s)))
     con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                  (hour, "A.A.G.A Master", master_decision["signal"], conf, json.dumps(master_decision)))
-    # Log news sentiment
     con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                  (hour, "A.A.G.A News", news_result.get("sentiment", "HOLD"), news_result.get("confidence", 0.0), json.dumps(news_result)))
     con2.commit(); con2.close()
@@ -485,7 +498,7 @@ async def master_signal():
         "probabilities": probs,
         "risk_brief": risk_brief,
         "strategy_used": master_decision.get("strategy_used", "Master"),
-        "gemini_advice": {"summary": "Available overnight"},
+        "gemini_advice": {"summary": "Available overnight" if gemini_analyst.available else "Gemini quota exhausted"},
         "market_trend": strategy_signals_list[0].get("trend") if strategy_signals_list else "Unknown",
         "sweep_detected": False, "sweep_type": None, "mss": None, "fvg": None,
         "current_price": strategy_signals_list[0].get("current_price", 0) if strategy_signals_list else 0,
