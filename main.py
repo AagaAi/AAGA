@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI Trading OS (Gemini Optimized, No Throttling)
+# main.py – A.A.G.A AI Trading OS (Debug Logging + Gemini Nightly + Keep‑Alive)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -17,7 +17,7 @@ GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 METAAPI_TOKEN      = os.environ.get("METAAPI_TOKEN", "")
 METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 
-DB_PATH = "journal.db"
+DB_PATH = "journal.db"            # <-- EARLY DEFINITION
 
 app = FastAPI(title="A.A.G.A AI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -292,9 +292,18 @@ async def autonomous_trading_loop():
         try:
             await update_pending_trades()
             sniper = await run_sniper_analysis()
+            # ---- Debug logging ----
+            probs = {"BUY":0.0,"SELL":0.0,"HOLD":1.0}
+            if sniper["signal"] == "BUY": probs = {"BUY":0.9,"SELL":0.0,"HOLD":0.1}
+            elif sniper["signal"] == "SELL": probs = {"BUY":0.0,"SELL":0.9,"HOLD":0.1}
+            print(f"📡 Signal: {sniper['signal']} | Price: {sniper['current_price']} | Trend: {sniper['trend']} | Sweep: {sniper.get('sweep_detected')} {sniper.get('sweep_type')} @ {sniper.get('sweep_level')}")
+            print(f"   Probabilities: BUY:{probs['BUY']:.2f} SELL:{probs['SELL']:.2f} HOLD:{probs['HOLD']:.2f}")
+            # ----------------------
             if sniper["signal"] in ("BUY", "SELL") and sniper["entry_zone"] and sniper["sl"] and sniper["tp"]:
                 entry = sniper["entry_zone"][0] if sniper["signal"] == "BUY" else sniper["entry_zone"][1]
-                if not validate_stops(sniper["signal"], entry, sniper["sl"], sniper["tp"]): continue
+                if not validate_stops(sniper["signal"], entry, sniper["sl"], sniper["tp"]):
+                    print("⏩ Skipping trade – invalid stops")
+                    continue
                 con = sqlite3.connect(DB_PATH)
                 existing = con.execute("SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?", (sniper["signal"],)).fetchone()[0]
                 con.close()
@@ -308,7 +317,13 @@ async def autonomous_trading_loop():
                     order = await execute_trade_async(sniper["signal"], sniper["sl"], sniper["tp"], lot=0.01)
                     if order: print(f"✅ A.A.G.A Auto trade: {sniper['signal']}")
                     else: print("❌ A.A.G.A Auto trade failed")
-        except Exception as e: print(f"Autonomous loop error: {e}")
+                else:
+                    print(f"⏩ Same direction open trade exists (signal={sniper['signal']}), skipping")
+            else:
+                if sniper["signal"] == "HOLD":
+                    print("ℹ️ No valid signal (HOLD). Waiting for setup.")
+        except Exception as e:
+            print(f"Autonomous loop error: {e}")
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
 @app.on_event("startup")
@@ -366,7 +381,6 @@ async def master_signal():
     sniper = await run_sniper_analysis()
     mtf = {"htf_bias":"Bullish","confluence_score":6}
     now = datetime.datetime.utcnow()
-    # Gemini not called here to save quota; use nightly for insights
     gemini_advice = {"summary": "Available overnight"}
 
     if sniper["signal"] == "BUY": tech_probs = {"BUY":0.9,"SELL":0.0,"HOLD":0.1}
