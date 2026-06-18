@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI OS (All Agents + AI Strategy + Auto-Select)
+# main.py – A.A.G.A AI OS (All Agents, AI Strategy, Auto-Select)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -8,7 +8,7 @@ import pandas as pd
 from metaapi_cloud_sdk import MetaApi
 from agents.gemini_agent import GeminiAnalyst
 from agents.strategy_agent import EmaDmiStrategy
-from agents.ai_agent import AIPureStrategy, ai_strategy as ai_strat_instance
+from agents.ai_agent import RandomForestStrategy
 from backtest import run_comparison as compare_strategies
 
 # ---------- Config ----------
@@ -27,10 +27,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 ema_dmi_strat = EmaDmiStrategy(config.get("parameters", {}))
-# AI strategy is a singleton imported
+ai_strat_instance = RandomForestStrategy()
 
-# current active strategy (can be switched)
-active_strategy = "ema_dmi"  # or "ai"
+active_strategy = "ema_dmi"  # can be switched to "ai"
 
 # ============================================================
 # MetaApi singleton (async)
@@ -51,7 +50,7 @@ async def get_account():
     return account
 
 # ============================================================
-# Async MetaApi helpers (unchanged)
+# Async MetaApi helpers
 # ============================================================
 async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
@@ -93,10 +92,34 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
 # ============================================================
 # AGENTS
 # ============================================================
-# News Agent (inline)
+# News Agent (RSS)
 def run_news_analysis():
-    # (same as before)
-    return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
+    # (simple inline version; feedparser already imported)
+    try:
+        items = []
+        for feed in [{"url": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC%3DF&region=US&lang=en-US"},
+                     {"url": "https://www.investing.com/rss/news_25.rss"}]:
+            parsed = feedparser.parse(feed["url"])
+            for entry in parsed.entries[:5]:
+                title = entry.get("title", "")
+                if not title: continue
+                text = title + " " + entry.get("summary", "")
+                low = text.lower()
+                high_hits = sum(1 for kw in ["fomc","rate","cpi","nfp","gdp","war","recession"] if kw in low)
+                med_hits  = sum(1 for kw in ["unemployment","retail","gold","dollar"] if kw in low)
+                items.append(high_hits + med_hits)
+        total = sum(items)
+        if any(h > 0 for h in items):
+            risk = "High"
+        elif total >= 3:
+            risk = "Medium"
+        else:
+            risk = "Low"
+        if risk == "High": return {"prob_buy":0.0, "prob_sell":0.0, "prob_hold":0.9}
+        elif risk == "Medium": return {"prob_buy":0.3, "prob_sell":0.3, "prob_hold":0.4}
+        else: return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
+    except:
+        return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
 # Risk Manager (inline)
 class RiskManager:
@@ -131,7 +154,7 @@ async def run_aggregated_analysis():
     opens  = [c['open'] for c in raw1m]
     ohlc = {'highs': highs, 'lows': lows, 'closes': closes, 'opens': opens}
 
-    # Get signal from active strategy
+    # Tech signal from active strategy
     tech_signal = await get_signal_from_strategy(active_strategy, ohlc)
 
     # News agent
@@ -139,7 +162,7 @@ async def run_aggregated_analysis():
     # Risk agent
     risk_data = risk_manager.evaluate()
 
-    # Tech probabilities from signal
+    # Probabilities
     if tech_signal["signal"] == "BUY":
         tech_probs = {"BUY":0.8, "SELL":0.1, "HOLD":0.1}
     elif tech_signal["signal"] == "SELL":
@@ -149,11 +172,7 @@ async def run_aggregated_analysis():
 
     news_probs = {"BUY": news_data["prob_buy"], "SELL": news_data["prob_sell"], "HOLD": news_data["prob_hold"]}
     risk_probs = {"BUY": risk_data["prob_buy"], "SELL": risk_data["prob_sell"], "HOLD": risk_data["prob_hold"]}
-    strat_probs = {"BUY":0.5, "SELL":0.5, "HOLD":0.0}  # default
-
-    # Now include AI agent as another agent (if different from tech)
-    # We'll just add another agent weight for "AI" using tech_probs but could be separate
-    # For simplicity, we'll combine tech+ai weights together
+    strat_probs = {"BUY":0.5, "SELL":0.5, "HOLD":0.0}
 
     w = config["parameters"]["agent_weights"]
     final_probs = {
@@ -180,7 +199,7 @@ async def run_aggregated_analysis():
     }
 
 # ============================================================
-# Outcome checker (same)
+# Outcome checker
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
@@ -203,7 +222,7 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly Gemini Analysis (same)
+# Nightly Gemini Analysis
 # ============================================================
 async def nightly_gemini_analysis():
     while True:
@@ -255,11 +274,10 @@ async def nightly_gemini_analysis():
             print("ℹ️ No completed trades yesterday for A.A.G.A analysis.")
 
 # ============================================================
-# Weekly Auto-Strategy Comparison (runs on Sunday midnight)
+# Weekly Strategy Auto-Select
 # ============================================================
 async def weekly_strategy_select():
     while True:
-        # Wait until Sunday 00:05 UTC
         now = datetime.datetime.utcnow()
         days_until_sunday = (6 - now.weekday()) % 7
         next_sunday = now + datetime.timedelta(days=days_until_sunday)
@@ -278,7 +296,6 @@ async def weekly_strategy_select():
                 else:
                     active_strategy = "ai"
                 print(f"🏆 Switched to best strategy: {comp_result['best_strategy']}")
-            # Store comparison in agent_log
             hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
             con = sqlite3.connect(DB_PATH)
             con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
