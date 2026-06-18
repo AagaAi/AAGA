@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI OS (All Agents, AI Strategy, Auto-Select)
+# main.py – A.A.G.A AI OS (Multi-Strategy Autonomous Trading)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -26,10 +26,11 @@ app = FastAPI(title="A.A.G.A AI OS")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
+
+# ---------- Strategy Instances ----------
 ema_dmi_strat = EmaDmiStrategy(config.get("parameters", {}))
 ai_strat_instance = RandomForestStrategy()
-
-active_strategy = "ema_dmi"  # can be switched to "ai"
+all_strategies = [ema_dmi_strat, ai_strat_instance]
 
 # ============================================================
 # MetaApi singleton (async)
@@ -92,9 +93,8 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
 # ============================================================
 # AGENTS
 # ============================================================
-# News Agent (RSS)
+# News Agent (RSS) – unchanged
 def run_news_analysis():
-    # (simple inline version; feedparser already imported)
     try:
         items = []
         for feed in [{"url": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC%3DF&region=US&lang=en-US"},
@@ -109,19 +109,15 @@ def run_news_analysis():
                 med_hits  = sum(1 for kw in ["unemployment","retail","gold","dollar"] if kw in low)
                 items.append(high_hits + med_hits)
         total = sum(items)
-        if any(h > 0 for h in items):
-            risk = "High"
-        elif total >= 3:
-            risk = "Medium"
-        else:
-            risk = "Low"
+        if any(h > 0 for h in items): risk = "High"
+        elif total >= 3: risk = "Medium"
+        else: risk = "Low"
         if risk == "High": return {"prob_buy":0.0, "prob_sell":0.0, "prob_hold":0.9}
         elif risk == "Medium": return {"prob_buy":0.3, "prob_sell":0.3, "prob_hold":0.4}
         else: return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
     except:
         return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
-# Risk Manager (inline)
 class RiskManager:
     def __init__(self): self.daily_pnl = 0.0; self.loss_limit = 500
     def evaluate(self):
@@ -132,21 +128,19 @@ class RiskManager:
 risk_manager = RiskManager()
 
 # ============================================================
-# Combined Signal (uses active strategy)
+# Multi-Strategy Signal Generator
 # ============================================================
 MIN_STOP_DISTANCE = 1.10
 
-async def get_signal_from_strategy(strategy_name, ohlc):
-    if strategy_name == "ema_dmi":
-        return ema_dmi_strat.get_signal(ohlc)
-    else:  # ai
-        return ai_strat_instance.get_signal(ohlc)
+async def get_strategy_signal(strat, ohlc):
+    """Wrapper to call the strategy's get_signal method."""
+    return strat.get_signal(ohlc)
 
-async def run_aggregated_analysis():
+async def run_all_strategies():
+    """Fetch candles once, then generate signals for all strategies."""
     raw1m = await sdk_get_candles_async("XAUUSD", "1m", 200)
     if not raw1m or len(raw1m) < 50:
-        price = await sdk_get_price_async("XAUUSD") or 0
-        return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Data Unavailable","current_price":price}
+        return None, None
 
     highs  = [c['high'] for c in raw1m]
     lows   = [c['low'] for c in raw1m]
@@ -154,59 +148,21 @@ async def run_aggregated_analysis():
     opens  = [c['open'] for c in raw1m]
     ohlc = {'highs': highs, 'lows': lows, 'closes': closes, 'opens': opens}
 
-    # Tech signal from active strategy
-    tech_signal = await get_signal_from_strategy(active_strategy, ohlc)
-
-    # News agent
-    news_data = run_news_analysis()
-    # Risk agent
-    risk_data = risk_manager.evaluate()
-
-    # Probabilities
-    if tech_signal["signal"] == "BUY":
-        tech_probs = {"BUY":0.8, "SELL":0.1, "HOLD":0.1}
-    elif tech_signal["signal"] == "SELL":
-        tech_probs = {"BUY":0.1, "SELL":0.8, "HOLD":0.1}
-    else:
-        tech_probs = {"BUY":0.3, "SELL":0.3, "HOLD":0.4}
-
-    news_probs = {"BUY": news_data["prob_buy"], "SELL": news_data["prob_sell"], "HOLD": news_data["prob_hold"]}
-    risk_probs = {"BUY": risk_data["prob_buy"], "SELL": risk_data["prob_sell"], "HOLD": risk_data["prob_hold"]}
-    strat_probs = {"BUY":0.5, "SELL":0.5, "HOLD":0.0}
-
-    w = config["parameters"]["agent_weights"]
-    final_probs = {
-        "BUY":  tech_probs["BUY"]*w["tech"] + news_probs["BUY"]*w["news"] + risk_probs["BUY"]*w["risk"] + strat_probs["BUY"]*w["strategy"],
-        "SELL": tech_probs["SELL"]*w["tech"] + news_probs["SELL"]*w["news"] + risk_probs["SELL"]*w["risk"] + strat_probs["SELL"]*w["strategy"],
-        "HOLD": tech_probs["HOLD"]*w["tech"] + news_probs["HOLD"]*w["news"] + risk_probs["HOLD"]*w["risk"] + strat_probs["HOLD"]*w["strategy"],
-    }
-    decision = max(final_probs, key=final_probs.get)
-
-    # Risk brief from tech_signal if decision matches
-    risk_brief = None
-    if decision == tech_signal["signal"] and tech_signal["entry_zone"] and tech_signal["sl"] and tech_signal["tp"]:
-        entry = tech_signal["entry_zone"][0] if decision=="BUY" else tech_signal["entry_zone"][1]
-        risk_brief = {"entry":round(entry,2), "sl":tech_signal["sl"], "tp":tech_signal["tp"]}
-
-    return {
-        "signal": decision,
-        "entry_zone": tech_signal.get("entry_zone") if decision == tech_signal["signal"] else None,
-        "sl": tech_signal.get("sl") if decision == tech_signal["signal"] else None,
-        "tp": tech_signal.get("tp") if decision == tech_signal["signal"] else None,
-        "trend": tech_signal.get("trend", "Unknown"),
-        "current_price": tech_signal.get("current_price", 0),
-        "agent_probs": {"tech": tech_probs, "news": news_probs, "risk": risk_probs, "strategy": strat_probs}
-    }
+    signals = []
+    for strat in all_strategies:
+        sig = await get_strategy_signal(strat, ohlc)
+        signals.append((strat, sig))
+    return ohlc, signals
 
 # ============================================================
-# Outcome checker
+# Outcome checker (unchanged, works on any strategy)
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
     if price is None: return
     con = sqlite3.connect(DB_PATH)
-    trades = con.execute("SELECT id, pair, signal, entry, sl, tp FROM trade_journal WHERE outcome IS NULL").fetchall()
-    for tid, pair, sig, entry, sl, tp in trades:
+    trades = con.execute("SELECT id, pair, signal, entry, sl, tp, outcome, pnl, strategy_used FROM trade_journal WHERE outcome IS NULL").fetchall()
+    for tid, pair, sig, entry, sl, tp, _, _, strat_name in trades:
         if entry is None: continue
         outcome = pnl = None
         if sig == "BUY":
@@ -222,7 +178,7 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly Gemini Analysis
+# Nightly Gemini Auto‑Tuning (per strategy)
 # ============================================================
 async def nightly_gemini_analysis():
     while True:
@@ -232,49 +188,50 @@ async def nightly_gemini_analysis():
         await asyncio.sleep(wait_seconds)
 
         con = sqlite3.connect(DB_PATH)
-        trades = con.execute("""
-            SELECT id, signal, entry, sl, tp, outcome, pnl, timestamp
+        # Group trades by strategy
+        rows = con.execute("""
+            SELECT strategy_used, id, signal, entry, sl, tp, outcome, pnl, timestamp
             FROM trade_journal
             WHERE date(timestamp) = date('now', '-1 day') AND outcome IS NOT NULL
-            ORDER BY timestamp
+            ORDER BY strategy_used, timestamp
         """).fetchall()
         con.close()
 
-        if trades:
-            trade_list = [{
-                "id": t[0], "signal": t[1], "entry": t[2], "sl": t[3], "tp": t[4],
-                "outcome": t[5], "pnl": t[6], "timestamp": t[7]
-            } for t in trades]
+        if rows:
+            from collections import defaultdict
+            grouped = defaultdict(list)
+            for r in rows:
+                strat_name, tid, sig, entry, sl, tp, outc, pnl, ts = r
+                grouped[strat_name].append({
+                    "id": tid, "signal": sig, "entry": entry, "sl": sl, "tp": tp,
+                    "outcome": outc, "pnl": pnl, "timestamp": ts
+                })
 
-            daily_insight = gemini_analyst.analyze_daily_trades(trade_list)
-            print(f"📊 A.A.G.A Nightly Analysis: {daily_insight.get('summary', 'No insight')}")
+            for strat_name, trades in grouped.items():
+                daily_insight = gemini_analyst.analyze_daily_trades(trades)
+                print(f"📊 {strat_name} Nightly Analysis: {daily_insight.get('summary', 'No insight')}")
 
-            hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
-            con = sqlite3.connect(DB_PATH)
-            con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                        (hour, "A.A.G.A Gemini", "DAILY_REVIEW", 1.0, json.dumps(daily_insight)))
-            con.commit()
+                hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
+                con = sqlite3.connect(DB_PATH)
+                con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                            (hour, f"A.A.G.A Gemini ({strat_name})", "DAILY_REVIEW", 1.0, json.dumps(daily_insight)))
+                con.commit(); con.close()
 
-            suggestions = daily_insight.get("parameter_suggestions", {})
-            if suggestions:
-                for key, val in suggestions.items():
-                    if hasattr(ema_dmi_strat, key):
-                        setattr(ema_dmi_strat, key, val)
-                with open(CONFIG_PATH, "r+") as f:
-                    cfg = json.load(f)
-                    params = cfg.get("parameters", {})
-                    for key, val in suggestions.items():
-                        params[key] = val
-                    cfg["parameters"] = params
-                    f.seek(0)
-                    json.dump(cfg, f, indent=2)
-                    f.truncate()
-                print("✅ A.A.G.A self‑optimized parameters:", suggestions)
+                suggestions = daily_insight.get("parameter_suggestions", {})
+                if suggestions:
+                    # Apply to the matching strategy instance
+                    for strat in all_strategies:
+                        if strat.name == strat_name:
+                            for key, val in suggestions.items():
+                                if hasattr(strat, key):
+                                    setattr(strat, key, val)
+                            # Also save to config if desired (simplified: not saving per-strategy config here)
+                            print(f"✅ {strat_name} self‑optimized: {suggestions}")
         else:
-            print("ℹ️ No completed trades yesterday for A.A.G.A analysis.")
+            print("ℹ️ No completed trades yesterday for any strategy.")
 
 # ============================================================
-# Weekly Strategy Auto-Select
+# Weekly Strategy Auto‑Select (still compares all)
 # ============================================================
 async def weekly_strategy_select():
     while True:
@@ -287,25 +244,20 @@ async def weekly_strategy_select():
         wait_seconds = (next_sunday - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
-        global active_strategy
         try:
             comp_result = await compare_strategies()
             if comp_result.get('best_strategy'):
-                if comp_result['best_strategy'] == 'EmaDmiStrategy':
-                    active_strategy = "ema_dmi"
-                else:
-                    active_strategy = "ai"
-                print(f"🏆 Switched to best strategy: {comp_result['best_strategy']}")
+                print(f"🏆 Best monthly backtest: {comp_result['best_strategy']} (no live switch; manual if desired)")
             hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
             con = sqlite3.connect(DB_PATH)
             con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                        (hour, "A.A.G.A Strategy Selector", "SWITCH", 1.0, json.dumps(comp_result)))
+                        (hour, "A.A.G.A Strategy Selector", "MONTHLY_BACKTEST", 1.0, json.dumps(comp_result)))
             con.commit(); con.close()
         except Exception as e:
             print(f"Weekly strategy select error: {e}")
 
 # ============================================================
-# Autonomous Trading Loop + Keep‑alive
+# Autonomous Trading Loop (Multi‑Strategy)
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -325,38 +277,53 @@ async def autonomous_trading_loop():
     while True:
         try:
             await update_pending_trades()
-            signal_info = await run_aggregated_analysis()
-            print(f"📡 Aggregated Signal ({active_strategy}): {signal_info['signal']} | Price: {signal_info['current_price']} | Trend: {signal_info['trend']}")
-            if signal_info["signal"] in ("BUY", "SELL") and signal_info["entry_zone"] and signal_info["sl"] and signal_info["tp"]:
-                entry = signal_info["entry_zone"][0] if signal_info["signal"] == "BUY" else signal_info["entry_zone"][1]
-                sl, tp = signal_info["sl"], signal_info["tp"]
-                if signal_info["signal"] == "BUY":
+            ohlc, strategy_signals = await run_all_strategies()
+            if ohlc is None:
+                await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
+                continue
+
+            for strat, signal_info in strategy_signals:
+                sig = signal_info.get("signal")
+                if sig not in ("BUY", "SELL"):
+                    continue
+                entry_zone = signal_info.get("entry_zone")
+                sl = signal_info.get("sl")
+                tp = signal_info.get("tp")
+                if not entry_zone or not sl or not tp:
+                    continue
+
+                entry = entry_zone[0] if sig == "BUY" else entry_zone[1]
+                # Stop validation
+                if sig == "BUY":
                     if sl > entry - MIN_STOP_DISTANCE or tp < entry + MIN_STOP_DISTANCE:
-                        print("⚠️ Invalid stops, skipping")
+                        print(f"⚠️ {strat.name}: Invalid stops, skipping")
                         continue
                 else:
                     if sl < entry + MIN_STOP_DISTANCE or tp > entry - MIN_STOP_DISTANCE:
-                        print("⚠️ Invalid stops, skipping")
+                        print(f"⚠️ {strat.name}: Invalid stops, skipping")
                         continue
 
+                # Check existing open trade for this strategy & direction
                 con = sqlite3.connect(DB_PATH)
-                existing = con.execute("SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?", (signal_info["signal"],)).fetchone()[0]
+                existing = con.execute(
+                    "SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND strategy_used = ? AND signal = ?",
+                    (strat.name, sig)
+                ).fetchone()[0]
                 con.close()
                 if existing == 0:
                     risk_brief = {"entry": round(entry,2), "sl": sl, "tp": tp}
                     con = sqlite3.connect(DB_PATH)
                     con.execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
-                                (datetime.datetime.utcnow().isoformat(), "XAUUSD", signal_info["signal"],
-                                 risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], active_strategy, ""))
+                                (datetime.datetime.utcnow().isoformat(), "XAUUSD", sig,
+                                 risk_brief["entry"], risk_brief["sl"], risk_brief["tp"],
+                                 strat.name, ""))
                     con.commit(); con.close()
-                    order = await execute_trade_async(signal_info["signal"], sl, tp, lot=0.01)
-                    if order: print(f"✅ A.A.G.A Auto trade ({active_strategy}): {signal_info['signal']}")
-                    else: print("❌ A.A.G.A Auto trade failed")
+                    order = await execute_trade_async(sig, sl, tp, lot=0.01)
+                    if order: print(f"✅ {strat.name} Auto trade: {sig}")
+                    else: print(f"❌ {strat.name} Auto trade failed")
                 else:
-                    print(f"⏩ Same direction open trade exists, skipping")
-            else:
-                if signal_info["signal"] == "HOLD":
-                    print("ℹ️ No valid signal (HOLD). Waiting for setup.")
+                    print(f"⏩ {strat.name}: Same direction open trade exists, skipping")
+
         except Exception as e:
             print(f"Autonomous loop error: {e}")
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
@@ -410,51 +377,26 @@ def dashboard():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "autonomous_loop": "active", "gemini": gemini_analyst.available}
+    return {"status": "ok", "autonomous_loop": "active", "strategies": [s.name for s in all_strategies]}
 
 @app.get("/master-signal")
 async def master_signal():
-    signal_info = await run_aggregated_analysis()
-    now = datetime.datetime.utcnow()
-    gemini_advice = {"summary": "Available overnight"}
-
-    decision = signal_info["signal"]
-    agent_probs = signal_info.get("agent_probs", {})
-
-    risk_brief = None
-    if decision in ("BUY","SELL") and signal_info["entry_zone"] and signal_info["sl"] and signal_info["tp"]:
-        entry = signal_info["entry_zone"][0] if decision=="BUY" else signal_info["entry_zone"][1]
-        risk_brief = {"entry":round(entry,2),"sl":signal_info["sl"],"tp":signal_info["tp"]}
-
-    hour = now.strftime("%Y-%m-%d %H:00")
-    con = sqlite3.connect(DB_PATH)
-    for ag_name, probs in [("A.A.G.A Tech", agent_probs.get("tech", {})),
-                           ("A.A.G.A News", agent_probs.get("news", {})),
-                           ("A.A.G.A Risk", agent_probs.get("risk", {})),
-                           ("A.A.G.A Strategy", agent_probs.get("strategy", {}))]:
-        if probs:
-            act = max(probs, key=probs.get)
-            con.execute("INSERT INTO agent_log (hour,agent,action,prob,details) VALUES (?,?,?,?,?)",
-                        (hour, ag_name, act, probs[act], json.dumps(probs)))
-    con.commit(); con.close()
-
-    return {
-        "decision":decision,
-        "probabilities": {
-            "BUY": agent_probs.get("tech",{}).get("BUY",0)*0.4 + agent_probs.get("news",{}).get("BUY",0)*0.2 + agent_probs.get("risk",{}).get("BUY",0)*0.2 + agent_probs.get("strategy",{}).get("BUY",0)*0.2,
-            "SELL": agent_probs.get("tech",{}).get("SELL",0)*0.4 + agent_probs.get("news",{}).get("SELL",0)*0.2 + agent_probs.get("risk",{}).get("SELL",0)*0.2 + agent_probs.get("strategy",{}).get("SELL",0)*0.2,
-            "HOLD": agent_probs.get("tech",{}).get("HOLD",0)*0.4 + agent_probs.get("news",{}).get("HOLD",0)*0.2 + agent_probs.get("risk",{}).get("HOLD",0)*0.2 + agent_probs.get("strategy",{}).get("HOLD",0)*0.2,
-        },
-        "risk_brief": risk_brief,
-        "strategy_used": active_strategy,
-        "gemini_advice": gemini_advice,
-        "market_trend": signal_info["trend"],
-        "sweep_detected": False,
-        "sweep_type": None,
-        "mss": None,
-        "fvg": None,
-        "current_price": signal_info["current_price"]
-    }
+    # Return aggregated view: all strategies signals
+    ohlc, strategy_signals = await run_all_strategies()
+    if ohlc is None:
+        return {"error": "No data"}
+    results = []
+    for strat, sig in strategy_signals:
+        results.append({
+            "strategy": strat.name,
+            "signal": sig.get("signal"),
+            "entry_zone": sig.get("entry_zone"),
+            "sl": sig.get("sl"),
+            "tp": sig.get("tp"),
+            "trend": sig.get("trend"),
+            "current_price": sig.get("current_price")
+        })
+    return {"strategies": results}
 
 @app.get("/agent-log")
 def agent_log():
@@ -466,17 +408,48 @@ def agent_log():
 @app.get("/today-trades")
 def today_trades():
     con = sqlite3.connect(DB_PATH)
-    rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
+    rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl, strategy_used FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
     con.close()
-    return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7]} for r in rows]
+    return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7],"strategy":r[8]} for r in rows]
 
 @app.get("/trade-reviews")
 def trade_reviews():
     con = sqlite3.connect(DB_PATH)
-    rows = con.execute("SELECT id, timestamp, signal, entry, sl, tp, outcome, pnl, gemini_insight FROM trade_journal WHERE outcome IS NOT NULL ORDER BY timestamp DESC LIMIT 50").fetchall()
+    rows = con.execute("SELECT id, timestamp, signal, entry, sl, tp, outcome, pnl, gemini_insight, strategy_used FROM trade_journal WHERE outcome IS NOT NULL ORDER BY timestamp DESC LIMIT 50").fetchall()
     con.close()
     return [{"id": r[0], "timestamp": r[1], "signal": r[2], "entry": r[3], "sl": r[4], "tp": r[5],
-             "outcome": r[6], "pnl": r[7], "gemini_insight": r[8]} for r in rows]
+             "outcome": r[6], "pnl": r[7], "gemini_insight": r[8], "strategy": r[9]} for r in rows]
+
+@app.get("/strategy-performance")
+def strategy_performance():
+    """Return per‑strategy daily stats."""
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute("""
+        SELECT strategy_used,
+               COUNT(*) as total,
+               SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as losses,
+               SUM(pnl) as total_pnl
+        FROM trade_journal
+        WHERE date(timestamp) = date('now') AND outcome IS NOT NULL
+        GROUP BY strategy_used
+    """).fetchall()
+    con.close()
+    result = {}
+    for r in rows:
+        name = r[0] or "unknown"
+        total = r[1]
+        wins = r[2] or 0
+        losses = r[3] or 0
+        win_rate = wins / total * 100 if total > 0 else 0
+        result[name] = {
+            "total_trades": total,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(win_rate, 1),
+            "pnl": round(r[4] or 0, 2)
+        }
+    return result
 
 @app.get("/compare-strategies")
 async def compare_strategies_endpoint():
@@ -484,11 +457,8 @@ async def compare_strategies_endpoint():
 
 @app.post("/switch-strategy")
 async def switch_strategy(name: str):
-    global active_strategy
-    if name in ["ema_dmi", "ai"]:
-        active_strategy = name
-        return {"status": "ok", "active": name}
-    return {"status": "error", "message": "invalid strategy"}
+    # This now just logs; all strategies run simultaneously.
+    return {"status": "ok", "message": f"All strategies are active; {name} is just one of them."}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT",8000)))
