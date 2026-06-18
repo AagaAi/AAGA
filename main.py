@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Master Agent + Multi-Strategy)
+# main.py – A.A.G.A AI (Phase 2: Self-Learning + Dynamic Lot)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -10,6 +10,7 @@ from agents.gemini_agent import GeminiAnalyst
 from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
+from agents.memory import TradeMemory
 from backtest import run_comparison as compare_strategies
 
 # ---------- Config ----------
@@ -56,19 +57,38 @@ def run_news_analysis():
     except: return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
 class RiskManager:
-    def __init__(self): self.daily_pnl = 0.0; self.loss_limit = 500
+    def __init__(self, balance=10000, risk_per_trade=0.02):
+        self.balance = balance
+        self.risk_per_trade = risk_per_trade
+        self.daily_pnl = 0.0
+        self.loss_limit = balance * 0.05
+
     def evaluate(self):
         if -self.daily_pnl >= self.loss_limit:
             return {"prob_buy":0.0, "prob_sell":0.0, "prob_hold":1.0, "halt": True}
         return {"prob_buy":0.33, "prob_sell":0.33, "prob_hold":0.34, "halt": False}
-    def update_pnl(self, pnl): self.daily_pnl += pnl
-risk_manager = RiskManager()
 
-# Master Agent
+    def update_pnl(self, pnl):
+        self.daily_pnl += pnl
+        self.balance += pnl
+
+    def calculate_lot(self, entry, sl):
+        if sl is None or entry is None:
+            return 0.01
+        risk_amount = self.balance * self.risk_per_trade
+        sl_distance = abs(entry - sl)
+        if sl_distance < 0.5:
+            sl_distance = 0.5
+        lot = risk_amount / (sl_distance * 100)   # 100 oz per lot for XAUUSD
+        lot = max(0.01, round(lot, 2))
+        return lot
+
+risk_manager = RiskManager()
 master_agent = MasterAgent(all_strategies, risk_manager.evaluate, run_news_analysis)
+trade_memory = TradeMemory(DB_PATH)
 
 # ============================================================
-# MetaApi singleton (async)
+# MetaApi singleton (async) – unchanged
 # ============================================================
 _api_instance   = None
 _account_cache  = None
@@ -83,9 +103,6 @@ async def get_account():
     _account_cache = account
     return account
 
-# ============================================================
-# Async MetaApi helpers
-# ============================================================
 async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
     account = await get_account()
@@ -110,7 +127,7 @@ async def sdk_get_price_async(symbol: str):
     finally: await connection.close()
     return None
 
-async def execute_trade_async(signal, sl, tp, lot=0.01):
+async def execute_trade_async(signal, sl, tp, lot):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
     account = await get_account()
     connection = account.get_rpc_connection()
@@ -123,7 +140,7 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
     finally: await connection.close()
 
 # ============================================================
-# Multi-Strategy Signal Generator
+# Multi-Strategy Signal Generator (unchanged)
 # ============================================================
 MIN_STOP_DISTANCE = 1.10
 
@@ -145,7 +162,7 @@ async def run_all_strategies():
     return ohlc, signals
 
 # ============================================================
-# Outcome checker (unchanged)
+# Outcome checker (adds experience to memory)
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
@@ -163,19 +180,49 @@ async def update_pending_trades():
             elif price <= tp: outcome, pnl = "WIN",  round((entry - tp) * 100, 2)
         if outcome:
             con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?", (outcome, pnl, tid))
-            if outcome in ("WIN","LOSS"): risk_manager.update_pnl(pnl)
+            if outcome in ("WIN","LOSS"):
+                risk_manager.update_pnl(pnl)
+                # ---- Add experience to memory ----
+                action_map = {"BUY": 0, "SELL": 1, "HOLD": 2}
+                features = [entry/2000, sl/2000, tp/2000, abs(entry-sl)/10, abs(tp-entry)/10]
+                trade_memory.add_experience({
+                    "features": features,
+                    "action": action_map.get(sig, 2),
+                    "reward": pnl / 100   # scaled reward
+                })
     con.commit(); con.close()
 
 # ============================================================
-# Nightly Gemini Auto‑Tuning (per strategy) + update master
+# Nightly Gemini + Retrain RandomForest (Phase 2)
 # ============================================================
-async def nightly_gemini_analysis():
+async def nightly_analysis_and_retrain():
     while True:
         now = datetime.datetime.utcnow()
         next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
+        # --- Retrain RandomForest from experiences ---
+        if trade_memory.retrain_model(ai_strat_instance.model):
+            ai_strat_instance.trained = True
+            print("✅ RandomForest retrained with new experiences")
+
+        # --- Update Master Agent performance ---
+        con = sqlite3.connect(DB_PATH)
+        rows = con.execute("""
+            SELECT strategy_used, COUNT(*) as total,
+                   SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins
+            FROM trade_journal
+            WHERE date(timestamp) = date('now', '-1 day') AND outcome IS NOT NULL
+            GROUP BY strategy_used
+        """).fetchall()
+        con.close()
+        for r in rows:
+            name, total, wins = r[0], r[1], r[2] if r[2] else 0
+            win_rate = wins / total if total > 0 else 0.5
+            master_agent.update_performance(name, win_rate)
+
+        # --- Gemini daily analysis (unchanged) ---
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, id, signal, entry, sl, tp, outcome, pnl, timestamp
@@ -184,7 +231,6 @@ async def nightly_gemini_analysis():
             ORDER BY strategy_used, timestamp
         """).fetchall()
         con.close()
-
         if rows:
             from collections import defaultdict
             grouped = defaultdict(list)
@@ -194,15 +240,7 @@ async def nightly_gemini_analysis():
                     "id": tid, "signal": sig, "entry": entry, "sl": sl, "tp": tp,
                     "outcome": outc, "pnl": pnl, "timestamp": ts
                 })
-
             for strat_name, trades in grouped.items():
-                # Update master agent win rate
-                total = len(trades)
-                wins = sum(1 for t in trades if t['outcome'] == 'WIN')
-                win_rate = wins / total if total > 0 else 0.5
-                master_agent.update_performance(strat_name, win_rate)
-
-                # Gemini analysis
                 daily_insight = gemini_analyst.analyze_daily_trades(trades)
                 print(f"📊 {strat_name} Nightly Analysis: {daily_insight.get('summary', 'No insight')}")
                 hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
@@ -210,7 +248,6 @@ async def nightly_gemini_analysis():
                 con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                             (hour, f"A.A.G.A Gemini ({strat_name})", "DAILY_REVIEW", 1.0, json.dumps(daily_insight)))
                 con.commit(); con.close()
-
                 suggestions = daily_insight.get("parameter_suggestions", {})
                 if suggestions:
                     for strat in all_strategies:
@@ -222,29 +259,7 @@ async def nightly_gemini_analysis():
             print("ℹ️ No completed trades yesterday for any strategy.")
 
 # ============================================================
-# Weekly Strategy Auto‑Select (unchanged)
-# ============================================================
-async def weekly_strategy_select():
-    while True:
-        now = datetime.datetime.utcnow()
-        days_until_sunday = (6 - now.weekday()) % 7
-        next_sunday = now + datetime.timedelta(days=days_until_sunday)
-        next_sunday = next_sunday.replace(hour=0, minute=5, second=0)
-        if days_until_sunday == 0 and now > next_sunday: next_sunday = next_sunday + datetime.timedelta(weeks=1)
-        wait_seconds = (next_sunday - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
-        try:
-            comp_result = await compare_strategies()
-            if comp_result.get('best_strategy'): print(f"🏆 Best monthly backtest: {comp_result['best_strategy']}")
-            hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
-            con = sqlite3.connect(DB_PATH)
-            con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                        (hour, "A.A.G.A Strategy Selector", "MONTHLY_BACKTEST", 1.0, json.dumps(comp_result)))
-            con.commit(); con.close()
-        except Exception as e: print(f"Weekly strategy select error: {e}")
-
-# ============================================================
-# Autonomous Trading Loop (Master Agent Decision)
+# Autonomous Trading Loop (Master Decision + Dynamic Lot)
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -281,7 +296,6 @@ async def autonomous_trading_loop():
                     "current_price": sig.get("current_price")
                 })
 
-            # Master decision
             final_decision = master_agent.decide(signal_dicts)
             decision_signal = final_decision["signal"]
             if decision_signal not in ("BUY", "SELL"):
@@ -307,14 +321,13 @@ async def autonomous_trading_loop():
                     print("⚠️ Invalid stops, skipping")
                     continue
 
-            # Check for existing open trade of same direction (any strategy)
+            # Check existing open trade same direction
             con = sqlite3.connect(DB_PATH)
-            existing = con.execute(
-                "SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?",
-                (decision_signal,)
-            ).fetchone()[0]
+            existing = con.execute("SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?", (decision_signal,)).fetchone()[0]
             con.close()
             if existing == 0:
+                # Dynamic lot size
+                lot = risk_manager.calculate_lot(entry, sl)
                 risk_brief = {"entry": round(entry,2), "sl": sl, "tp": tp}
                 strat_used = final_decision.get("strategy_used", "Master")
                 con = sqlite3.connect(DB_PATH)
@@ -323,8 +336,8 @@ async def autonomous_trading_loop():
                              risk_brief["entry"], risk_brief["sl"], risk_brief["tp"],
                              strat_used, ""))
                 con.commit(); con.close()
-                order = await execute_trade_async(decision_signal, sl, tp, lot=0.01)
-                if order: print(f"✅ Master Auto trade ({strat_used}): {decision_signal}")
+                order = await execute_trade_async(decision_signal, sl, tp, lot)
+                if order: print(f"✅ Master Auto trade ({strat_used}): {decision_signal} | Lot: {lot}")
                 else: print("❌ Master Auto trade failed")
             else:
                 print("⏩ Same direction open trade exists, skipping")
@@ -336,11 +349,11 @@ async def autonomous_trading_loop():
 async def startup():
     asyncio.create_task(keep_alive_task())
     asyncio.create_task(autonomous_trading_loop())
-    asyncio.create_task(nightly_gemini_analysis())
+    asyncio.create_task(nightly_analysis_and_retrain())
     asyncio.create_task(weekly_strategy_select())
 
 # ============================================================
-# Database init (unchanged)
+# Database init
 # ============================================================
 def init_db():
     con = sqlite3.connect(DB_PATH)
@@ -372,7 +385,29 @@ def init_db():
 init_db()
 
 # ============================================================
-# Routes (Dashboard‑friendly)
+# Weekly Strategy Auto‑Select (unchanged)
+# ============================================================
+async def weekly_strategy_select():
+    while True:
+        now = datetime.datetime.utcnow()
+        days_until_sunday = (6 - now.weekday()) % 7
+        next_sunday = now + datetime.timedelta(days=days_until_sunday)
+        next_sunday = next_sunday.replace(hour=0, minute=5, second=0)
+        if days_until_sunday == 0 and now > next_sunday: next_sunday = next_sunday + datetime.timedelta(weeks=1)
+        wait_seconds = (next_sunday - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        try:
+            comp_result = await compare_strategies()
+            if comp_result.get('best_strategy'): print(f"🏆 Best monthly backtest: {comp_result['best_strategy']}")
+            hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
+            con = sqlite3.connect(DB_PATH)
+            con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                        (hour, "A.A.G.A Strategy Selector", "MONTHLY_BACKTEST", 1.0, json.dumps(comp_result)))
+            con.commit(); con.close()
+        except Exception as e: print(f"Weekly strategy select error: {e}")
+
+# ============================================================
+# Routes (unchanged except /master-signal includes master_decision)
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -386,67 +421,42 @@ async def health():
 async def master_signal():
     ohlc, strategy_signals = await run_all_strategies()
     if ohlc is None or strategy_signals is None:
-        return {
-            "decision": "HOLD",
-            "probabilities": {"BUY": 0.33, "SELL": 0.33, "HOLD": 0.34},
-            "risk_brief": None,
-            "strategy_used": "No data",
-            "gemini_advice": {"summary": "Market closed / no data"},
-            "market_trend": "Unknown",
-            "sweep_detected": False, "sweep_type": None, "mss": None, "fvg": None,
-            "current_price": 0,
-            "strategy_signals": [],
-            "master_decision": None
-        }
+        return {"decision": "HOLD", "probabilities": {"BUY": 0.33, "SELL": 0.33, "HOLD": 0.34},
+                "risk_brief": None, "strategy_used": "No data",
+                "gemini_advice": {"summary": "Market closed / no data"},
+                "market_trend": "Unknown",
+                "sweep_detected": False, "sweep_type": None, "mss": None, "fvg": None,
+                "current_price": 0, "strategy_signals": [], "master_decision": None}
 
-    # Build per-strategy signals
     strategy_signals_list = []
     for strat, sig in strategy_signals:
         strategy_signals_list.append({
-            "name": strat.name,
-            "signal": sig.get("signal"),
-            "entry_zone": sig.get("entry_zone"),
-            "sl": sig.get("sl"),
-            "tp": sig.get("tp"),
-            "trend": sig.get("trend"),
-            "current_price": sig.get("current_price")
+            "name": strat.name, "signal": sig.get("signal"),
+            "entry_zone": sig.get("entry_zone"), "sl": sig.get("sl"), "tp": sig.get("tp"),
+            "trend": sig.get("trend"), "current_price": sig.get("current_price")
         })
 
-    # Master decision
-    signal_dicts = [{
-        "strategy": s["name"],
-        "signal": s["signal"],
-        "entry_zone": s["entry_zone"],
-        "sl": s["sl"],
-        "tp": s["tp"],
-        "current_price": s["current_price"]
-    } for s in strategy_signals_list]
+    signal_dicts = [{"strategy": s["name"], "signal": s["signal"], "entry_zone": s["entry_zone"],
+                     "sl": s["sl"], "tp": s["tp"], "current_price": s["current_price"]} for s in strategy_signals_list]
     master_decision = master_agent.decide(signal_dicts)
 
-    # Build dashboard probabilities from master confidence
     conf = master_decision.get("confidence", 0.5)
-    if master_decision["signal"] == "BUY":
-        probs = {"BUY": conf, "SELL": 0.0, "HOLD": 1-conf}
-    elif master_decision["signal"] == "SELL":
-        probs = {"BUY": 0.0, "SELL": conf, "HOLD": 1-conf}
-    else:
-        probs = {"BUY": 0.3, "SELL": 0.3, "HOLD": 0.4}
+    if master_decision["signal"] == "BUY": probs = {"BUY": conf, "SELL": 0.0, "HOLD": 1-conf}
+    elif master_decision["signal"] == "SELL": probs = {"BUY": 0.0, "SELL": conf, "HOLD": 1-conf}
+    else: probs = {"BUY": 0.3, "SELL": 0.3, "HOLD": 0.4}
 
     risk_brief = None
     if master_decision["signal"] in ("BUY","SELL") and master_decision.get("entry_zone"):
         entry = master_decision["entry_zone"][0] if master_decision["signal"]=="BUY" else master_decision["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": master_decision["sl"], "tp": master_decision["tp"]}
 
-    # Log agent activity
     now = datetime.datetime.utcnow()
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
     for s in strategy_signals_list:
-        act = s.get("signal", "HOLD")
-        prob = 0.8 if act in ("BUY","SELL") else 0.3
+        act = s.get("signal", "HOLD"); prob = 0.8 if act in ("BUY","SELL") else 0.3
         con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                      (hour, f"A.A.G.A {s['name']}", act, prob, json.dumps(s)))
-    # Log master decision
     con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                  (hour, "A.A.G.A Master", master_decision["signal"], conf, json.dumps(master_decision)))
     con2.commit(); con2.close()
@@ -503,17 +513,10 @@ def strategy_performance():
     result = {}
     for r in rows:
         name = r[0] or "unknown"
-        total = r[1]
-        wins = r[2] or 0
-        losses = r[3] or 0
+        total = r[1]; wins = r[2] or 0; losses = r[3] or 0
         win_rate = wins / total * 100 if total > 0 else 0
-        result[name] = {
-            "total_trades": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(win_rate, 1),
-            "pnl": round(r[4] or 0, 2)
-        }
+        result[name] = {"total_trades": total, "wins": wins, "losses": losses,
+                        "win_rate": round(win_rate, 1), "pnl": round(r[4] or 0, 2)}
     return result
 
 @app.get("/compare-strategies")
