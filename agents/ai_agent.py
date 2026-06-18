@@ -11,9 +11,10 @@ class RandomForestStrategy:
     """
     Self-learning strategy using Random Forest.
     Trains on historical OHLC patterns and weekly outcome labels.
-    Lightweight – no TensorFlow, works perfectly on Render free tier.
+    Lightweight – works perfectly on Render free tier.
     """
     def __init__(self, config=None):
+        self.name = "RandomForest"
         self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
         self.trained = False
         self.feature_window = 10
@@ -54,8 +55,6 @@ class RandomForestStrategy:
             return
         X, y = [], []
         for trade in trade_journal:
-            # Simplified: use price levels as features (in real use, reconstruct OHLC at trade time)
-            # For demonstration, we create a simple feature set from trade entry/sl/tp
             entry = trade.get('entry', 0)
             sl = trade.get('sl', 0)
             tp = trade.get('tp', 0)
@@ -132,6 +131,3 @@ class RandomForestStrategy:
             "trend": trend,
             "current_price": current_price
         }
-
-# Singleton
-ai_strategy = RandomForestStrategy()
