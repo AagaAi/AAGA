@@ -1,5 +1,5 @@
-# main.py – A.A.G.A AI (Phase 3: Dynamic Strategy Generator)
-import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
+# main.py – A.A.G.A AI (Phase 5: Gemini News Sentiment)
+import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +12,7 @@ from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
 from agents.strategy_factory import StrategyFactory
+from agents.news_agent import NewsSentimentAgent       # <-- new
 from backtest import run_comparison as compare_strategies
 
 # ---------- Config ----------
@@ -31,32 +32,15 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 ema_dmi_strat = EmaDmiStrategy(config.get("parameters", {}))
 ai_strat_instance = RandomForestStrategy()
-# List of active strategies – new ones added here
 active_strategies = [ema_dmi_strat, ai_strat_instance]
 
 # ---------- Agents ----------
+news_agent = NewsSentimentAgent(gemini_analyst)       # <-- create instance
+
 def run_news_analysis():
-    try:
-        items = []
-        for feed in [{"url": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC%3DF&region=US&lang=en-US"},
-                     {"url": "https://www.investing.com/rss/news_25.rss"}]:
-            parsed = feedparser.parse(feed["url"])
-            for entry in parsed.entries[:5]:
-                title = entry.get("title", "")
-                if not title: continue
-                text = title + " " + entry.get("summary", "")
-                low = text.lower()
-                high_hits = sum(1 for kw in ["fomc","rate","cpi","nfp","gdp","war","recession"] if kw in low)
-                med_hits  = sum(1 for kw in ["unemployment","retail","gold","dollar"] if kw in low)
-                items.append(high_hits + med_hits)
-        total = sum(items)
-        if any(h > 0 for h in items): risk = "High"
-        elif total >= 3: risk = "Medium"
-        else: risk = "Low"
-        if risk == "High": return {"prob_buy":0.0, "prob_sell":0.0, "prob_hold":0.9}
-        elif risk == "Medium": return {"prob_buy":0.3, "prob_sell":0.3, "prob_hold":0.4}
-        else: return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
-    except: return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
+    """Return dict with prob_hold for Master Agent."""
+    result = news_agent.analyze()
+    return {"prob_hold": result.get("prob_hold", 0.0), "full": result}
 
 class RiskManager:
     def __init__(self, balance=10000, risk_per_trade=0.02):
@@ -84,6 +68,7 @@ class RiskManager:
         return lot
 
 risk_manager = RiskManager()
+# Master Agent now receives the new news function
 master_agent = MasterAgent(active_strategies, risk_manager.evaluate, run_news_analysis)
 trade_memory = TradeMemory(DB_PATH)
 strategy_factory = StrategyFactory(gemini_analyst)
@@ -141,7 +126,7 @@ async def execute_trade_async(signal, sl, tp, lot):
     finally: await connection.close()
 
 # ============================================================
-# Multi-Strategy Signal Generator (uses active_strategies)
+# Multi-Strategy Signal Generator (unchanged)
 # ============================================================
 MIN_STOP_DISTANCE = 1.10
 
@@ -193,7 +178,7 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly: Gemini analysis, retrain, and strategy generation
+# Nightly tasks (unchanged: retrain, Gemini analysis, factory)
 # ============================================================
 async def nightly_tasks():
     while True:
@@ -202,12 +187,12 @@ async def nightly_tasks():
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
-        # 1. Retrain RandomForest
+        # Retrain RandomForest
         if trade_memory.retrain_model(ai_strat_instance.model):
             ai_strat_instance.trained = True
             print("✅ RandomForest retrained")
 
-        # 2. Update master agent performance
+        # Update master agent performance
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, COUNT(*) as total,
@@ -222,7 +207,7 @@ async def nightly_tasks():
             win_rate = wins / total if total > 0 else 0.5
             master_agent.update_performance(name, win_rate)
 
-        # 3. Gemini daily analysis and parameter tuning
+        # Gemini daily analysis and parameter tuning
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, id, signal, entry, sl, tp, outcome, pnl, timestamp
@@ -256,9 +241,8 @@ async def nightly_tasks():
                                 if hasattr(strat, key): setattr(strat, key, val)
                             print(f"✅ {strat_name} self‑optimized: {suggestions}")
 
-        # 4. Generate new strategy if enabled
+        # Strategy factory (generate new strategy)
         try:
-            # Get market context from last 1h
             candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
             if candles_1h and len(candles_1h) >= 50:
                 closes_1h = [c['close'] for c in candles_1h]
@@ -271,7 +255,6 @@ async def nightly_tasks():
             else:
                 market_context = {"current_price": 0, "trend": "Unknown", "volatility": 0}
 
-            # Get last 10 trades
             con = sqlite3.connect(DB_PATH)
             recent = con.execute("SELECT signal, entry, sl, tp, outcome, pnl FROM trade_journal ORDER BY id DESC LIMIT 10").fetchall()
             con.close()
@@ -281,12 +264,10 @@ async def nightly_tasks():
             if new_params:
                 new_strategy = strategy_factory.create_strategy_from_params(new_params)
                 if new_strategy:
-                    # Add to active list if not already present
                     if not any(s.name == new_strategy.name for s in active_strategies):
                         active_strategies.append(new_strategy)
                         master_agent.strategies = active_strategies
                         print(f"🌟 New strategy '{new_strategy.name}' added to active strategies!")
-                        # Log event
                         hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
                         con = sqlite3.connect(DB_PATH)
                         con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
@@ -296,7 +277,7 @@ async def nightly_tasks():
             print(f"Strategy generation error: {e}")
 
 # ============================================================
-# Autonomous Trading Loop (Master Decision + Dynamic Lot)
+# Autonomous Trading Loop (unchanged, uses new news via master)
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -440,7 +421,7 @@ async def weekly_strategy_select():
         except Exception as e: print(f"Weekly strategy select error: {e}")
 
 # ============================================================
-# Routes (unchanged except /master-signal includes master_decision)
+# Routes (including news sentiment endpoint)
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -483,6 +464,8 @@ async def master_signal():
         entry = master_decision["entry_zone"][0] if master_decision["signal"]=="BUY" else master_decision["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": master_decision["sl"], "tp": master_decision["tp"]}
 
+    # Include news sentiment in response
+    news_result = news_agent.analyze()
     now = datetime.datetime.utcnow()
     hour = now.strftime("%Y-%m-%d %H:00")
     con2 = sqlite3.connect(DB_PATH)
@@ -492,6 +475,9 @@ async def master_signal():
                      (hour, f"A.A.G.A {s['name']}", act, prob, json.dumps(s)))
     con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                  (hour, "A.A.G.A Master", master_decision["signal"], conf, json.dumps(master_decision)))
+    # Log news sentiment
+    con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                 (hour, "A.A.G.A News", news_result.get("sentiment", "HOLD"), news_result.get("confidence", 0.0), json.dumps(news_result)))
     con2.commit(); con2.close()
 
     return {
@@ -504,7 +490,8 @@ async def master_signal():
         "sweep_detected": False, "sweep_type": None, "mss": None, "fvg": None,
         "current_price": strategy_signals_list[0].get("current_price", 0) if strategy_signals_list else 0,
         "strategy_signals": strategy_signals_list,
-        "master_decision": master_decision
+        "master_decision": master_decision,
+        "news_sentiment": news_result
     }
 
 @app.get("/agent-log")
