@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Fully Autonomous, No Gemini Quota Issues)
+# main.py – A.A.G.A AI (News Time‑Window, No Gemini Quota Issues)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,7 +11,7 @@ from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
-from agents.news_agent import NewsSentimentAgent   # <-- Keyword-only news (no Gemini)
+from agents.news_agent import NewsSentimentAgent
 from backtest import run_comparison as compare_strategies
 
 # Strategy factory only if Gemini is available
@@ -37,7 +37,7 @@ ai_strat_instance = RandomForestStrategy()
 active_strategies = [ema_dmi_strat, ai_strat_instance]
 
 # ---------- Agents ----------
-news_agent = NewsSentimentAgent()   # No Gemini needed -> NO QUOTA ERRORS
+news_agent = NewsSentimentAgent()
 
 def run_news_analysis():
     result = news_agent.analyze()
@@ -72,7 +72,6 @@ risk_manager = RiskManager()
 master_agent = MasterAgent(active_strategies, risk_manager.evaluate, run_news_analysis)
 trade_memory = TradeMemory(DB_PATH)
 
-# Only create strategy factory if Gemini is available
 if gemini_analyst.available:
     try:
         from agents.strategy_factory import StrategyFactory
@@ -85,7 +84,7 @@ else:
     print("⚠️ Gemini unavailable – Strategy Factory disabled")
 
 # ============================================================
-# MetaApi singleton (async) – unchanged
+# MetaApi singleton (async)
 # ============================================================
 _api_instance   = None
 _account_cache  = None
@@ -137,7 +136,7 @@ async def execute_trade_async(signal, sl, tp, lot):
     finally: await connection.close()
 
 # ============================================================
-# Multi-Strategy Signal Generator (unchanged)
+# Multi-Strategy Signal Generator
 # ============================================================
 MIN_STOP_DISTANCE = 1.10
 
@@ -198,12 +197,10 @@ async def nightly_tasks():
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
-        # Retrain RandomForest (no Gemini needed)
         if trade_memory.retrain_model(ai_strat_instance.model):
             ai_strat_instance.trained = True
             print("✅ RandomForest retrained")
 
-        # Update master agent performance
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, COUNT(*) as total,
@@ -218,7 +215,6 @@ async def nightly_tasks():
             win_rate = wins / total if total > 0 else 0.5
             master_agent.update_performance(name, win_rate)
 
-        # Gemini daily analysis (skip if unavailable)
         if gemini_analyst.available and gemini_analyst.disabled_until <= _time.time():
             con = sqlite3.connect(DB_PATH)
             rows = con.execute("""
@@ -255,7 +251,6 @@ async def nightly_tasks():
         else:
             print("ℹ️ Gemini unavailable – skipping nightly analysis")
 
-        # Strategy factory (only if available)
         if strategy_factory and gemini_analyst.available and gemini_analyst.disabled_until <= _time.time():
             try:
                 candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
@@ -292,7 +287,7 @@ async def nightly_tasks():
                 print(f"Strategy generation error: {e}")
 
 # ============================================================
-# Autonomous Trading Loop (unchanged – no Gemini dependency)
+# Autonomous Trading Loop
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
