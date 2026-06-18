@@ -9,3 +9,4 @@ aiohttp
 google-generativeai
 scikit-learn
 matplotlib
+feedparser
