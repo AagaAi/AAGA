@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI OS (Stable Multi-Strategy)
+# main.py – A.A.G.A AI (Multi-Strategy Dashboard Friendly)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -22,7 +22,7 @@ METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 
 DB_PATH = "journal.db"
 
-app = FastAPI(title="A.A.G.A AI OS")
+app = FastAPI(title="A.A.G.A AI")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
@@ -38,18 +38,16 @@ _account_cache  = None
 
 async def get_account():
     global _api_instance, _account_cache
-    if _account_cache is not None:
-        return _account_cache
+    if _account_cache is not None: return _account_cache
     _api_instance  = MetaApi(METAAPI_TOKEN)
     account        = await _api_instance.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
-    if account.state not in ('DEPLOYING', 'DEPLOYED'):
-        await account.deploy()
+    if account.state not in ('DEPLOYING', 'DEPLOYED'): await account.deploy()
     await account.wait_connected()
     _account_cache = account
     return account
 
 # ============================================================
-# Async MetaApi helpers
+# Async MetaApi helpers (unchanged)
 # ============================================================
 async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
@@ -62,8 +60,7 @@ async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
         return [{"time": str(c.get("time", "")), "open": float(c.get("open", 0)), "high": float(c.get("high", 0)),
                  "low": float(c.get("low", 0)), "close": float(c.get("close", 0)),
                  "volume": float(c.get("tickVolume", c.get("volume", 0)))} for c in candles_raw]
-    except Exception as e:
-        print(f"SDK fetch error: {e}"); return None
+    except Exception as e: print(f"SDK fetch error: {e}"); return None
 
 async def sdk_get_price_async(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
@@ -89,9 +86,8 @@ async def execute_trade_async(signal, sl, tp, lot=0.01):
     finally: await connection.close()
 
 # ============================================================
-# AGENTS
+# AGENTS (unchanged)
 # ============================================================
-# News Agent (RSS)
 def run_news_analysis():
     try:
         items = []
@@ -113,20 +109,18 @@ def run_news_analysis():
         if risk == "High": return {"prob_buy":0.0, "prob_sell":0.0, "prob_hold":0.9}
         elif risk == "Medium": return {"prob_buy":0.3, "prob_sell":0.3, "prob_hold":0.4}
         else: return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
-    except:
-        return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
+    except: return {"prob_buy":0.5, "prob_sell":0.5, "prob_hold":0.0}
 
 class RiskManager:
     def __init__(self): self.daily_pnl = 0.0; self.loss_limit = 500
     def evaluate(self):
-        if -self.daily_pnl >= self.loss_limit:
-            return {"prob_buy":0.0, "prob_sell":0.0, "prob_hold":1.0, "halt": True}
+        if -self.daily_pnl >= self.loss_limit: return {"prob_buy":0.0, "prob_sell":0.0, "prob_hold":1.0, "halt": True}
         return {"prob_buy":0.33, "prob_sell":0.33, "prob_hold":0.34, "halt": False}
     def update_pnl(self, pnl): self.daily_pnl += pnl
 risk_manager = RiskManager()
 
 # ============================================================
-# Multi-Strategy Signal Generator
+# Multi-Strategy Signal Generator (unchanged)
 # ============================================================
 MIN_STOP_DISTANCE = 1.10
 
@@ -135,8 +129,7 @@ async def get_strategy_signal(strat, ohlc):
 
 async def run_all_strategies():
     raw1m = await sdk_get_candles_async("XAUUSD", "1m", 200)
-    if not raw1m or len(raw1m) < 50:
-        return None, None
+    if not raw1m or len(raw1m) < 50: return None, None
     highs  = [c['high'] for c in raw1m]
     lows   = [c['low'] for c in raw1m]
     closes = [c['close'] for c in raw1m]
@@ -149,7 +142,7 @@ async def run_all_strategies():
     return ohlc, signals
 
 # ============================================================
-# Outcome checker
+# Outcome checker (unchanged)
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
@@ -167,12 +160,11 @@ async def update_pending_trades():
             elif price <= tp: outcome, pnl = "WIN",  round((entry - tp) * 100, 2)
         if outcome:
             con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?", (outcome, pnl, tid))
-            if outcome in ("WIN","LOSS"):
-                risk_manager.update_pnl(pnl)
+            if outcome in ("WIN","LOSS"): risk_manager.update_pnl(pnl)
     con.commit(); con.close()
 
 # ============================================================
-# Nightly Gemini Auto‑Tuning (per strategy)
+# Nightly Gemini Auto‑Tuning (unchanged)
 # ============================================================
 async def nightly_gemini_analysis():
     while True:
@@ -180,7 +172,6 @@ async def nightly_gemini_analysis():
         next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
         wait_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(wait_seconds)
-
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
             SELECT strategy_used, id, signal, entry, sl, tp, outcome, pnl, timestamp
@@ -189,7 +180,6 @@ async def nightly_gemini_analysis():
             ORDER BY strategy_used, timestamp
         """).fetchall()
         con.close()
-
         if rows:
             from collections import defaultdict
             grouped = defaultdict(list)
@@ -212,14 +202,12 @@ async def nightly_gemini_analysis():
                     for strat in all_strategies:
                         if strat.name == strat_name:
                             for key, val in suggestions.items():
-                                if hasattr(strat, key):
-                                    setattr(strat, key, val)
+                                if hasattr(strat, key): setattr(strat, key, val)
                             print(f"✅ {strat_name} self‑optimized: {suggestions}")
-        else:
-            print("ℹ️ No completed trades yesterday for any strategy.")
+        else: print("ℹ️ No completed trades yesterday for any strategy.")
 
 # ============================================================
-# Weekly Strategy Auto‑Select
+# Weekly Strategy Auto‑Select (unchanged)
 # ============================================================
 async def weekly_strategy_select():
     while True:
@@ -227,25 +215,21 @@ async def weekly_strategy_select():
         days_until_sunday = (6 - now.weekday()) % 7
         next_sunday = now + datetime.timedelta(days=days_until_sunday)
         next_sunday = next_sunday.replace(hour=0, minute=5, second=0)
-        if days_until_sunday == 0 and now > next_sunday:
-            next_sunday = next_sunday + datetime.timedelta(weeks=1)
+        if days_until_sunday == 0 and now > next_sunday: next_sunday = next_sunday + datetime.timedelta(weeks=1)
         wait_seconds = (next_sunday - now).total_seconds()
         await asyncio.sleep(wait_seconds)
-
         try:
             comp_result = await compare_strategies()
-            if comp_result.get('best_strategy'):
-                print(f"🏆 Best monthly backtest: {comp_result['best_strategy']}")
+            if comp_result.get('best_strategy'): print(f"🏆 Best monthly backtest: {comp_result['best_strategy']}")
             hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
             con = sqlite3.connect(DB_PATH)
             con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                         (hour, "A.A.G.A Strategy Selector", "MONTHLY_BACKTEST", 1.0, json.dumps(comp_result)))
             con.commit(); con.close()
-        except Exception as e:
-            print(f"Weekly strategy select error: {e}")
+        except Exception as e: print(f"Weekly strategy select error: {e}")
 
 # ============================================================
-# Autonomous Trading Loop (Multi‑Strategy)
+# Autonomous Trading Loop (Multi‑Strategy) – unchanged
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -272,45 +256,35 @@ async def autonomous_trading_loop():
 
             for strat, signal_info in strategy_signals:
                 sig = signal_info.get("signal")
-                if sig not in ("BUY", "SELL"):
-                    continue
+                if sig not in ("BUY", "SELL"): continue
                 entry_zone = signal_info.get("entry_zone")
                 sl = signal_info.get("sl")
                 tp = signal_info.get("tp")
-                if not entry_zone or not sl or not tp:
-                    continue
+                if not entry_zone or not sl or not tp: continue
 
                 entry = entry_zone[0] if sig == "BUY" else entry_zone[1]
                 if sig == "BUY":
                     if sl > entry - MIN_STOP_DISTANCE or tp < entry + MIN_STOP_DISTANCE:
-                        print(f"⚠️ {strat.name}: Invalid stops, skipping")
-                        continue
+                        print(f"⚠️ {strat.name}: Invalid stops, skipping"); continue
                 else:
                     if sl < entry + MIN_STOP_DISTANCE or tp > entry - MIN_STOP_DISTANCE:
-                        print(f"⚠️ {strat.name}: Invalid stops, skipping")
-                        continue
+                        print(f"⚠️ {strat.name}: Invalid stops, skipping"); continue
 
                 con = sqlite3.connect(DB_PATH)
-                existing = con.execute(
-                    "SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND strategy_used = ? AND signal = ?",
-                    (strat.name, sig)
-                ).fetchone()[0]
+                existing = con.execute("SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND strategy_used = ? AND signal = ?", (strat.name, sig)).fetchone()[0]
                 con.close()
                 if existing == 0:
                     risk_brief = {"entry": round(entry,2), "sl": sl, "tp": tp}
                     con = sqlite3.connect(DB_PATH)
                     con.execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
                                 (datetime.datetime.utcnow().isoformat(), "XAUUSD", sig,
-                                 risk_brief["entry"], risk_brief["sl"], risk_brief["tp"],
-                                 strat.name, ""))
+                                 risk_brief["entry"], risk_brief["sl"], risk_brief["tp"], strat.name, ""))
                     con.commit(); con.close()
                     order = await execute_trade_async(sig, sl, tp, lot=0.01)
                     if order: print(f"✅ {strat.name} Auto trade: {sig}")
                     else: print(f"❌ {strat.name} Auto trade failed")
-                else:
-                    print(f"⏩ {strat.name}: Same direction open trade exists, skipping")
-        except Exception as e:
-            print(f"Autonomous loop error: {e}")
+                else: print(f"⏩ {strat.name}: Same direction open trade exists, skipping")
+        except Exception as e: print(f"Autonomous loop error: {e}")
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
 @app.on_event("startup")
@@ -348,9 +322,7 @@ def init_db():
             details TEXT
         );
     """)
-    con.commit()
-    con.close()
-
+    con.commit(); con.close()
 init_db()
 
 # ============================================================
@@ -368,7 +340,6 @@ async def health():
 async def master_signal():
     ohlc, strategy_signals = await run_all_strategies()
     if ohlc is None or strategy_signals is None:
-        # Fallback for dashboard
         return {
             "decision": "HOLD",
             "probabilities": {"BUY": 0.33, "SELL": 0.33, "HOLD": 0.34},
@@ -376,28 +347,46 @@ async def master_signal():
             "strategy_used": "No data",
             "gemini_advice": {"summary": "Market closed / no data"},
             "market_trend": "Unknown",
-            "sweep_detected": False,
-            "sweep_type": None,
-            "mss": None,
-            "fvg": None,
-            "current_price": 0
+            "sweep_detected": False, "sweep_type": None, "mss": None, "fvg": None,
+            "current_price": 0,
+            "strategy_signals": []
         }
 
-    # Aggregate view: use the first strategy's signal for dashboard simplicity
+    # Aggregate for main decision: use first strategy's signal (EMA+DMI+BOS)
     first_strat, first_sig = strategy_signals[0]
     decision = first_sig.get("signal", "HOLD")
-    # Build probabilities
-    if decision == "BUY":
-        probs = {"BUY": 0.8, "SELL": 0.1, "HOLD": 0.1}
-    elif decision == "SELL":
-        probs = {"BUY": 0.1, "SELL": 0.8, "HOLD": 0.1}
-    else:
-        probs = {"BUY": 0.3, "SELL": 0.3, "HOLD": 0.4}
+    if decision == "BUY": probs = {"BUY": 0.8, "SELL": 0.1, "HOLD": 0.1}
+    elif decision == "SELL": probs = {"BUY": 0.1, "SELL": 0.8, "HOLD": 0.1}
+    else: probs = {"BUY": 0.3, "SELL": 0.3, "HOLD": 0.4}
 
     risk_brief = None
     if decision in ("BUY","SELL") and first_sig.get("entry_zone") and first_sig.get("sl") and first_sig.get("tp"):
         entry = first_sig["entry_zone"][0] if decision=="BUY" else first_sig["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": first_sig["sl"], "tp": first_sig["tp"]}
+
+    # Build per-strategy signals array for dashboard
+    strategy_signals_list = []
+    for strat, sig in strategy_signals:
+        strategy_signals_list.append({
+            "name": strat.name,
+            "signal": sig.get("signal"),
+            "entry_zone": sig.get("entry_zone"),
+            "sl": sig.get("sl"),
+            "tp": sig.get("tp"),
+            "trend": sig.get("trend"),
+            "current_price": sig.get("current_price")
+        })
+
+    # Log agent activity for each strategy signal
+    now = datetime.datetime.utcnow()
+    hour = now.strftime("%Y-%m-%d %H:00")
+    con2 = sqlite3.connect(DB_PATH)
+    for strat, sig in strategy_signals:
+        act = sig.get("signal", "HOLD")
+        prob = 0.8 if act in ("BUY","SELL") else 0.3
+        con2.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                     (hour, f"A.A.G.A {strat.name}", act, prob, json.dumps(sig)))
+    con2.commit(); con2.close()
 
     return {
         "decision": decision,
@@ -406,11 +395,9 @@ async def master_signal():
         "strategy_used": first_strat.name,
         "gemini_advice": {"summary": "Available overnight"},
         "market_trend": first_sig.get("trend", "Unknown"),
-        "sweep_detected": False,
-        "sweep_type": None,
-        "mss": None,
-        "fvg": None,
-        "current_price": first_sig.get("current_price", 0)
+        "sweep_detected": False, "sweep_type": None, "mss": None, "fvg": None,
+        "current_price": first_sig.get("current_price", 0),
+        "strategy_signals": strategy_signals_list
     }
 
 @app.get("/agent-log")
