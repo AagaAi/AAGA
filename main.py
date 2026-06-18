@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Phase 6: Market Condition + AI Insights)
+# main.py – A.A.G.A AI (Phase 7: Full Autonomous Weekly Pipeline)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -12,10 +12,10 @@ from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
 from agents.news_agent import NewsSentimentAgent
-from agents.market_classifier import MarketClassifier   # <-- new
+from agents.market_classifier import MarketClassifier
+from agents.weekly_pipeline import weekly_self_retraining   # <-- NEW
 from backtest import run_comparison as compare_strategies
 
-# Strategy factory only if Gemini is available
 strategy_factory = None
 
 # ---------- Config ----------
@@ -86,7 +86,7 @@ else:
     print("⚠️ Gemini unavailable – Strategy Factory disabled")
 
 # ============================================================
-# MetaApi singleton (async)
+# MetaApi singleton (async) – unchanged
 # ============================================================
 _api_instance   = None
 _account_cache  = None
@@ -138,7 +138,7 @@ async def execute_trade_async(signal, sl, tp, lot):
     finally: await connection.close()
 
 # ============================================================
-# Multi-Strategy Signal Generator
+# Multi-Strategy Signal Generator (unchanged)
 # ============================================================
 MIN_STOP_DISTANCE = 1.10
 
@@ -165,7 +165,6 @@ async def run_all_strategies():
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
     if price is None: return
-    # Get current market condition for logging
     candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
     market_condition = market_classifier.classify(candles_1h) if candles_1h else "Unknown"
 
@@ -181,7 +180,6 @@ async def update_pending_trades():
             if price >= sl: outcome, pnl = "LOSS", round((entry - sl) * 100, 2)
             elif price <= tp: outcome, pnl = "WIN",  round((entry - tp) * 100, 2)
         if outcome:
-            # Update outcome, pnl, and market_condition
             con.execute("UPDATE trade_journal SET outcome=?, pnl=?, market_condition=? WHERE id=?", 
                         (outcome, pnl, market_condition, tid))
             if outcome in ("WIN","LOSS"):
@@ -196,7 +194,7 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly tasks (unchanged)
+# Nightly tasks (Gemini‑optional)
 # ============================================================
 async def nightly_tasks():
     while True:
@@ -207,7 +205,7 @@ async def nightly_tasks():
 
         if trade_memory.retrain_model(ai_strat_instance.model):
             ai_strat_instance.trained = True
-            print("✅ RandomForest retrained")
+            print("✅ RandomForest retrained (nightly)")
 
         con = sqlite3.connect(DB_PATH)
         rows = con.execute("""
@@ -362,7 +360,6 @@ async def autonomous_trading_loop():
                 lot = risk_manager.calculate_lot(entry, sl)
                 risk_brief = {"entry": round(entry,2), "sl": sl, "tp": tp}
                 strat_used = final_decision.get("strategy_used", "Master")
-                # Get current market condition for trade log
                 candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
                 mkt_condition = market_classifier.classify(candles_1h) if candles_1h else "Unknown"
                 con = sqlite3.connect(DB_PATH)
@@ -385,18 +382,17 @@ async def startup():
     asyncio.create_task(keep_alive_task())
     asyncio.create_task(autonomous_trading_loop())
     asyncio.create_task(nightly_tasks())
-    asyncio.create_task(weekly_strategy_select())
+    asyncio.create_task(weekly_scheduler())  # <-- This calls the weekly pipeline
 
 # ============================================================
-# Database init (add market_condition column)
+# Database init (unchanged)
 # ============================================================
 def init_db():
     con = sqlite3.connect(DB_PATH)
-    # Add market_condition column if not exists
     try:
         con.execute("ALTER TABLE trade_journal ADD COLUMN market_condition TEXT DEFAULT 'Unknown'")
     except:
-        pass  # column already exists
+        pass
     con.executescript("""
         CREATE TABLE IF NOT EXISTS trade_journal (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -426,29 +422,31 @@ def init_db():
 init_db()
 
 # ============================================================
-# Weekly Strategy Auto‑Select (unchanged)
+# Weekly Scheduler – calls the new pipeline
 # ============================================================
-async def weekly_strategy_select():
+async def weekly_scheduler():
     while True:
         now = datetime.datetime.utcnow()
         days_until_sunday = (6 - now.weekday()) % 7
         next_sunday = now + datetime.timedelta(days=days_until_sunday)
         next_sunday = next_sunday.replace(hour=0, minute=5, second=0)
-        if days_until_sunday == 0 and now > next_sunday: next_sunday = next_sunday + datetime.timedelta(weeks=1)
+        if days_until_sunday == 0 and now > next_sunday:
+            next_sunday = next_sunday + datetime.timedelta(weeks=1)
         wait_seconds = (next_sunday - now).total_seconds()
         await asyncio.sleep(wait_seconds)
-        try:
-            comp_result = await compare_strategies()
-            if comp_result.get('best_strategy'): print(f"🏆 Best monthly backtest: {comp_result['best_strategy']}")
-            hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
-            con = sqlite3.connect(DB_PATH)
-            con.execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                        (hour, "A.A.G.A Strategy Selector", "MONTHLY_BACKTEST", 1.0, json.dumps(comp_result)))
-            con.commit(); con.close()
-        except Exception as e: print(f"Weekly strategy select error: {e}")
+
+        # Run the full weekly self‑retraining pipeline
+        await weekly_self_retraining(
+            db_path=DB_PATH,
+            active_strategies=active_strategies,
+            master_agent=master_agent,
+            trade_memory=trade_memory,
+            gemini_analyst=gemini_analyst,
+            strategy_factory=strategy_factory
+        )
 
 # ============================================================
-# Routes (including /ai-insights and market-condition-performance)
+# Routes (unchanged)
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -589,7 +587,6 @@ def market_condition_performance():
 
 @app.get("/ai-insights")
 async def ai_insights():
-    """Use Gemini to generate insights from recent trades and market conditions (only if available)."""
     if not gemini_analyst.available or gemini_analyst.disabled_until > _time.time():
         return {"summary": "Gemini unavailable", "recommendations": []}
     con = sqlite3.connect(DB_PATH)
