@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (News Time‑Window, No Gemini Quota Issues)
+# main.py – A.A.G.A AI (Phase 6: Market Condition + AI Insights)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -12,6 +12,7 @@ from agents.ai_agent import RandomForestStrategy
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
 from agents.news_agent import NewsSentimentAgent
+from agents.market_classifier import MarketClassifier   # <-- new
 from backtest import run_comparison as compare_strategies
 
 # Strategy factory only if Gemini is available
@@ -38,6 +39,7 @@ active_strategies = [ema_dmi_strat, ai_strat_instance]
 
 # ---------- Agents ----------
 news_agent = NewsSentimentAgent()
+market_classifier = MarketClassifier()
 
 def run_news_analysis():
     result = news_agent.analyze()
@@ -158,11 +160,15 @@ async def run_all_strategies():
     return ohlc, signals
 
 # ============================================================
-# Outcome checker (adds experience)
+# Outcome checker (adds experience + market condition)
 # ============================================================
 async def update_pending_trades():
     price = await sdk_get_price_async("XAUUSD")
     if price is None: return
+    # Get current market condition for logging
+    candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
+    market_condition = market_classifier.classify(candles_1h) if candles_1h else "Unknown"
+
     con = sqlite3.connect(DB_PATH)
     trades = con.execute("SELECT id, pair, signal, entry, sl, tp, outcome, pnl, strategy_used FROM trade_journal WHERE outcome IS NULL").fetchall()
     for tid, pair, sig, entry, sl, tp, _, _, strat_name in trades:
@@ -175,7 +181,9 @@ async def update_pending_trades():
             if price >= sl: outcome, pnl = "LOSS", round((entry - sl) * 100, 2)
             elif price <= tp: outcome, pnl = "WIN",  round((entry - tp) * 100, 2)
         if outcome:
-            con.execute("UPDATE trade_journal SET outcome=?, pnl=? WHERE id=?", (outcome, pnl, tid))
+            # Update outcome, pnl, and market_condition
+            con.execute("UPDATE trade_journal SET outcome=?, pnl=?, market_condition=? WHERE id=?", 
+                        (outcome, pnl, market_condition, tid))
             if outcome in ("WIN","LOSS"):
                 risk_manager.update_pnl(pnl)
                 action_map = {"BUY": 0, "SELL": 1, "HOLD": 2}
@@ -188,7 +196,7 @@ async def update_pending_trades():
     con.commit(); con.close()
 
 # ============================================================
-# Nightly tasks (Gemini‑optional)
+# Nightly tasks (unchanged)
 # ============================================================
 async def nightly_tasks():
     while True:
@@ -287,7 +295,7 @@ async def nightly_tasks():
                 print(f"Strategy generation error: {e}")
 
 # ============================================================
-# Autonomous Trading Loop
+# Autonomous Trading Loop (unchanged)
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -354,11 +362,14 @@ async def autonomous_trading_loop():
                 lot = risk_manager.calculate_lot(entry, sl)
                 risk_brief = {"entry": round(entry,2), "sl": sl, "tp": tp}
                 strat_used = final_decision.get("strategy_used", "Master")
+                # Get current market condition for trade log
+                candles_1h = await sdk_get_candles_async("XAUUSD", "1h", 100)
+                mkt_condition = market_classifier.classify(candles_1h) if candles_1h else "Unknown"
                 con = sqlite3.connect(DB_PATH)
-                con.execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight) VALUES (?,?,?,?,?,?,?,?)",
+                con.execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight,market_condition) VALUES (?,?,?,?,?,?,?,?,?)",
                             (datetime.datetime.utcnow().isoformat(), "XAUUSD", decision_signal,
                              risk_brief["entry"], risk_brief["sl"], risk_brief["tp"],
-                             strat_used, ""))
+                             strat_used, "", mkt_condition))
                 con.commit(); con.close()
                 order = await execute_trade_async(decision_signal, sl, tp, lot)
                 if order: print(f"✅ Master Auto trade ({strat_used}): {decision_signal} | Lot: {lot}")
@@ -377,10 +388,15 @@ async def startup():
     asyncio.create_task(weekly_strategy_select())
 
 # ============================================================
-# Database init
+# Database init (add market_condition column)
 # ============================================================
 def init_db():
     con = sqlite3.connect(DB_PATH)
+    # Add market_condition column if not exists
+    try:
+        con.execute("ALTER TABLE trade_journal ADD COLUMN market_condition TEXT DEFAULT 'Unknown'")
+    except:
+        pass  # column already exists
     con.executescript("""
         CREATE TABLE IF NOT EXISTS trade_journal (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -393,7 +409,8 @@ def init_db():
             outcome       TEXT,
             pnl           REAL,
             strategy_used TEXT,
-            gemini_insight TEXT
+            gemini_insight TEXT,
+            market_condition TEXT DEFAULT 'Unknown'
         );
         CREATE TABLE IF NOT EXISTS agent_log (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -431,7 +448,7 @@ async def weekly_strategy_select():
         except Exception as e: print(f"Weekly strategy select error: {e}")
 
 # ============================================================
-# Routes
+# Routes (including /ai-insights and market-condition-performance)
 # ============================================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -512,17 +529,17 @@ def agent_log():
 @app.get("/today-trades")
 def today_trades():
     con = sqlite3.connect(DB_PATH)
-    rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl, strategy_used FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
+    rows = con.execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl, strategy_used, market_condition FROM trade_journal WHERE date(timestamp) = date('now') ORDER BY timestamp DESC").fetchall()
     con.close()
-    return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7],"strategy":r[8]} for r in rows]
+    return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7],"strategy":r[8],"market_condition":r[9]} for r in rows]
 
 @app.get("/trade-reviews")
 def trade_reviews():
     con = sqlite3.connect(DB_PATH)
-    rows = con.execute("SELECT id, timestamp, signal, entry, sl, tp, outcome, pnl, gemini_insight, strategy_used FROM trade_journal WHERE outcome IS NOT NULL ORDER BY timestamp DESC LIMIT 50").fetchall()
+    rows = con.execute("SELECT id, timestamp, signal, entry, sl, tp, outcome, pnl, gemini_insight, strategy_used, market_condition FROM trade_journal WHERE outcome IS NOT NULL ORDER BY timestamp DESC LIMIT 50").fetchall()
     con.close()
     return [{"id": r[0], "timestamp": r[1], "signal": r[2], "entry": r[3], "sl": r[4], "tp": r[5],
-             "outcome": r[6], "pnl": r[7], "gemini_insight": r[8], "strategy": r[9]} for r in rows]
+             "outcome": r[6], "pnl": r[7], "gemini_insight": r[8], "strategy": r[9], "market_condition": r[10]} for r in rows]
 
 @app.get("/strategy-performance")
 def strategy_performance():
@@ -546,6 +563,60 @@ def strategy_performance():
         result[name] = {"total_trades": total, "wins": wins, "losses": losses,
                         "win_rate": round(win_rate, 1), "pnl": round(r[4] or 0, 2)}
     return result
+
+@app.get("/market-condition-performance")
+def market_condition_performance():
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute("""
+        SELECT market_condition,
+               COUNT(*) as total,
+               SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as losses,
+               SUM(pnl) as total_pnl
+        FROM trade_journal
+        WHERE date(timestamp) = date('now') AND outcome IS NOT NULL AND market_condition IS NOT NULL
+        GROUP BY market_condition
+    """).fetchall()
+    con.close()
+    result = {}
+    for r in rows:
+        cond = r[0] or "Unknown"
+        total = r[1]; wins = r[2] or 0; losses = r[3] or 0
+        win_rate = wins / total * 100 if total > 0 else 0
+        result[cond] = {"total_trades": total, "wins": wins, "losses": losses,
+                        "win_rate": round(win_rate, 1), "pnl": round(r[4] or 0, 2)}
+    return result
+
+@app.get("/ai-insights")
+async def ai_insights():
+    """Use Gemini to generate insights from recent trades and market conditions (only if available)."""
+    if not gemini_analyst.available or gemini_analyst.disabled_until > _time.time():
+        return {"summary": "Gemini unavailable", "recommendations": []}
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute("SELECT signal, entry, sl, tp, outcome, pnl, market_condition, timestamp FROM trade_journal WHERE outcome IS NOT NULL ORDER BY timestamp DESC LIMIT 30").fetchall()
+    con.close()
+    if not rows:
+        return {"summary": "Not enough trade data", "recommendations": []}
+    trades = [{"signal": r[0], "entry": r[1], "sl": r[2], "tp": r[3], "outcome": r[4], "pnl": r[5], "market_condition": r[6], "timestamp": r[7]} for r in rows]
+    prompt = f"""
+You are a senior trading analyst. Analyze these recent XAUUSD trades (including market condition) and provide:
+1. Top 3 patterns that lead to wins/losses.
+2. Suggested action for next trade (BUY/SELL/HOLD) based on current market context (we will provide separately).
+3. Any adjustments to risk or strategy parameters.
+Return ONLY a JSON object with keys: "summary", "patterns" (list), "suggested_action", "parameter_suggestions" (dict).
+Trades: {json.dumps(trades, default=str)}
+"""
+    text = gemini_analyst._safe_generate(prompt)
+    if not text:
+        return {"summary": "Gemini call failed", "recommendations": []}
+    try:
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        return json.loads(text)
+    except:
+        return {"summary": "Parse error", "raw": text}
 
 @app.get("/compare-strategies")
 async def compare_strategies_endpoint():
