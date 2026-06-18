@@ -11,6 +11,8 @@ METAAPI_TOKEN = os.environ.get("METAAPI_TOKEN", "")
 METAAPI_ACCOUNT_ID = os.environ.get("METAAPI_ACCOUNT_ID", "")
 
 async def fetch_last_month_candles(symbol="XAUUSD", timeframe="1m"):
+    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
+        raise Exception("MetaApi credentials missing")
     api = MetaApi(METAAPI_TOKEN)
     account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
     await account.wait_connected()
@@ -21,6 +23,7 @@ async def fetch_last_month_candles(symbol="XAUUSD", timeframe="1m"):
     return candles
 
 def backtest_strategy(strategy, candles):
+    # ... (same logic as before, unchanged)
     trades = []
     balance = 10000.0
     position = 0
@@ -84,17 +87,17 @@ def backtest_strategy(strategy, candles):
     }
 
 async def run_comparison():
-    candles = await fetch_last_month_candles()
-    if not candles or len(candles) < 200:
-        return {"error": "Not enough historical data"}
+    try:
+        candles = await fetch_last_month_candles()
+        if not candles or len(candles) < 200:
+            return {"error": "Not enough historical data (less than 200 candles)"}
+    except Exception as e:
+        return {"error": f"Data fetch failed: {str(e)}"}
 
+    # Initialize strategies
     ema_dmi = EmaDmiStrategy()
     rf_strat = RandomForestStrategy()
-    # For Random Forest, we need to train it on some data – use a few random labels (placeholder)
-    # In a real scenario, you'd train on past trades. Here we just initialize.
-    # Since it's not trained, it'll fallback to trend, which is fine for comparison.
-    # Better: train on a few fake samples to have it active
-    # We'll quickly create dummy trade data to train RF
+    # Quick dummy training for RF so it doesn't just fallback to HOLD
     dummy_trades = [{"signal": "BUY", "entry": 2000, "sl": 1998, "tp": 2005},
                     {"signal": "SELL", "entry": 2005, "sl": 2007, "tp": 2000}]
     rf_strat.train_from_trades(dummy_trades)
