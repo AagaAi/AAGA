@@ -12,6 +12,7 @@ class EmaDmiStrategy:
     - SMC: Break of Structure (BOS) = market structure shift
     """
     def __init__(self, config: dict = None):
+        self.name = "EMA+DMI+BOS"
         self.ema_fast = 8
         self.ema_mid  = 21
         self.ema_slow = 50
