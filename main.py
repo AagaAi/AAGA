@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (15-Min Intelligence + 15m Regime Detection)
+# main.py – A.A.G.A AI (Agent Log 24h + Explain Fix)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -43,7 +43,7 @@ gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 telegram = TelegramNotifier()
 news_agent = NewsSentimentAgent()
 market_classifier = MarketClassifier()
-regime_detector = RegimeDetector()   # uses 15m candles now
+regime_detector = RegimeDetector()
 
 # ---------- Risk Manager ----------
 class RiskManager:
@@ -249,7 +249,7 @@ async def run_all_strategies(pair):
 
 MIN_STOP_DISTANCE = 1.10
 
-# ---------- 15-Min Gemini Intelligence ----------
+# ---------- 15‑Min Gemini Intelligence ----------
 GEMINI_INTERVAL_SEC = 900   # 15 minutes
 
 async def gemini_intelligence_cycle():
@@ -286,7 +286,7 @@ async def gemini_intelligence_cycle():
             print(f"15‑min Gemini error: {e}")
         await asyncio.sleep(GEMINI_INTERVAL_SEC)
 
-# ---------- Autonomous Loop (15m Regime Detection) ----------
+# ---------- Autonomous Loop ----------
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
 
@@ -306,7 +306,6 @@ async def autonomous_trading_loop():
     while True:
         for pair in pairs:
             try:
-                # Economic calendar
                 high_impact, event, _ = is_high_impact_now()
                 if high_impact:
                     print(f"⛔ High‑impact event {event} – HOLD all")
@@ -316,7 +315,6 @@ async def autonomous_trading_loop():
                 ohlc, strategy_signals = await run_all_strategies(pair)
                 if ohlc is None: continue
 
-                # ---- 15m Regime Detection ----
                 candles_15m = await sdk_get_candles_async(pair, "15m", 100)
                 regime = regime_detector.classify(candles_15m) if candles_15m else "UNKNOWN"
                 print(f"🔍 {pair} Regime (15m): {regime}")
@@ -352,6 +350,15 @@ async def autonomous_trading_loop():
                     "regime": regime
                 }
 
+                # Log agent activity for each strategy signal (✅ FIX)
+                now = datetime.datetime.utcnow()
+                hour = now.strftime("%Y-%m-%d %H:00")
+                for s in strategy_signals_list:
+                    act = s.get("signal", "HOLD")
+                    prob = 0.8 if act in ("BUY","SELL") else 0.3
+                    db_execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                               (hour, f"Agent {s['name']}", act, prob, json.dumps(s)), commit=True)
+
                 # Trade execution
                 if decision_signal in ("BUY", "SELL"):
                     entry_zone = final_decision.get("entry_zone")
@@ -370,7 +377,6 @@ async def autonomous_trading_loop():
                         lot = risk_managers[pair].calculate_lot(entry, sl)
                         risk_brief = {"entry": round(entry,2), "sl": sl, "tp": tp}
                         strat_used = final_decision.get("strategy_used", "Master")
-                        now = datetime.datetime.utcnow()
                         db_execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight,market_condition) VALUES (?,?,?,?,?,?,?,?,?)",
                                    (now.isoformat(), pair, decision_signal,
                                     risk_brief["entry"], risk_brief["sl"], risk_brief["tp"],
@@ -513,7 +519,8 @@ async def master_signal(pair: str = Query("XAUUSD")):
 
 @app.get("/agent-log")
 def agent_log():
-    rows = db_execute("SELECT hour, agent, action, prob, details FROM agent_log WHERE hour >= datetime('now','-1 hour') ORDER BY id DESC LIMIT 20", fetch=True)
+    # ✅ FIX: Query last 24 hours instead of 1 hour
+    rows = db_execute("SELECT hour, agent, action, prob, details FROM agent_log WHERE hour >= datetime('now', '-1 day') ORDER BY id DESC LIMIT 20", fetch=True)
     return [{"hour":r[0],"agent":r[1],"action":r[2],"prob":r[3],"details":r[4]} for r in rows] if rows else []
 
 @app.get("/today-trades")
@@ -597,6 +604,7 @@ async def explain_decision(pair: str):
         if strat.name == "RandomForest" and strat.trained:
             try: rf_importance = list(strat.model.feature_importances_)
             except: pass
+    # ✅ FIX: safe get for gemini_reasoning
     gemini_reasoning = latest_intelligence.get("summary", "Not available") if latest_intelligence else "Not available"
     return {
         "pair": pair,
