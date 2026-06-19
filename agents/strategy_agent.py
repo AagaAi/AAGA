@@ -4,24 +4,17 @@ import pandas as pd
 from typing import Dict, Any
 
 class EmaDmiStrategy:
-    """
-    XAUUSD 1-Minute Scalping Strategy:
-    - EMA 8, 21, 50 alignment
-    - DMI (ADX > 20) for trend strength
-    - Price slope (angle) & distance from EMA
-    - SMC: Break of Structure (BOS) = market structure shift
-    """
     def __init__(self, config: dict = None):
         self.name = "EMA+DMI+BOS"
         self.ema_fast = 8
         self.ema_mid  = 21
         self.ema_slow = 50
-        self.adx_threshold = 20
-        self.slope_threshold = 0.0001  # radians
+        self.adx_threshold = 15           # lower than before (was 20)
+        self.slope_threshold = 0.00005    # more sensitive
         self.lookback = 3
         self.min_stop_distance = 1.10
         self.atr_multiplier_sl = 1.5
-        self.rr_ratio = 2.0  # 1:2 risk reward
+        self.rr_ratio = 2.0
 
     def calculate_emas(self, closes: pd.Series):
         ema8  = closes.ewm(span=self.ema_fast).mean().iloc[-1]
@@ -94,6 +87,13 @@ class EmaDmiStrategy:
             signal = "BUY"
         elif sell_condition:
             signal = "SELL"
+
+        # ---- FALLBACK: If no ICT signal, just follow the trend ----
+        if signal == "HOLD":
+            if current_price > ema50 and plus_di > minus_di:
+                signal = "BUY"
+            elif current_price < ema50 and minus_di > plus_di:
+                signal = "SELL"
 
         sl_val = tp_val = entry_zone = None
         if signal != "HOLD":
