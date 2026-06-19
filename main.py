@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (MetaApi Timeout Resilient)
+# main.py – A.A.G.A AI (Timeout Fix + MetaApi Resilient)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -6,7 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import pandas as pd
 from metaapi_cloud_sdk import MetaApi
-from metaapi_cloud_sdk.clients.timeout_exception import TimeoutException
 from agents.gemini_agent import GeminiAnalyst
 from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
@@ -84,70 +83,78 @@ if gemini_analyst.available:
 else:
     print("⚠️ Gemini unavailable – Strategy Factory disabled")
 
-# MetaApi singleton with timeout resilience
+# MetaApi singleton with health flag
 _api_instance   = None
 _account_cache  = None
+_metaapi_healthy = True
 
 async def get_account():
-    global _api_instance, _account_cache
+    global _api_instance, _account_cache, _metaapi_healthy
     if _account_cache is not None:
         return _account_cache
+    if not _metaapi_healthy:
+        raise Exception("MetaApi currently unavailable")
     _api_instance  = MetaApi(METAAPI_TOKEN)
     account        = await _api_instance.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
     if account.state not in ('DEPLOYING', 'DEPLOYED'):
         await account.deploy()
     try:
-        # Shorter timeout (10 seconds) to avoid blocking the whole loop
-        await account.wait_connected(timeout=10)
+        # No timeout argument – just await
+        await account.wait_connected()
+        _account_cache = account
+        _metaapi_healthy = True
+        return account
     except Exception as e:
-        print(f"⚠️ MetaApi connection timeout ({e}). Will retry later.")
+        _metaapi_healthy = False
+        _account_cache = None
+        print(f"⚠️ MetaApi connection failed: {e}. Will retry later.")
         raise
-    _account_cache = account
-    return account
 
 async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
-    account = await get_account()
-    start_time = datetime.datetime.utcnow() + datetime.timedelta(days=1)
     try:
+        account = await get_account()
+        start_time = datetime.datetime.utcnow() + datetime.timedelta(days=1)
         candles_raw = await account.get_historical_candles(
             symbol=symbol, timeframe=timeframe, start_time=start_time, limit=limit)
         if not candles_raw: return None
         return [{"time": str(c.get("time", "")), "open": float(c.get("open", 0)), "high": float(c.get("high", 0)),
                  "low": float(c.get("low", 0)), "close": float(c.get("close", 0)),
                  "volume": float(c.get("tickVolume", c.get("volume", 0)))} for c in candles_raw]
-    except Exception as e: print(f"SDK fetch error: {e}"); return None
+    except Exception as e:
+        print(f"SDK fetch error: {e}")
+        return None
 
 async def sdk_get_price_async(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
-    account = await get_account()
-    connection = account.get_rpc_connection()
-    await connection.connect()
     try:
-        await connection.wait_synchronized(timeout=5)
-    except:
-        pass
-    try:
+        account = await get_account()
+        connection = account.get_rpc_connection()
+        await connection.connect()
+        await connection.wait_synchronized()
         price = await connection.get_symbol_price(symbol=symbol)
+        await connection.close()
         if price: return (float(price.get("bid", 0)) + float(price.get("ask", 0))) / 2
-    finally: await connection.close()
+    except Exception as e:
+        print(f"Price fetch error: {e}")
     return None
 
 async def execute_trade_async(signal, sl, tp, lot):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
-    account = await get_account()
-    connection = account.get_rpc_connection()
-    await connection.connect()
     try:
-        await connection.wait_synchronized(timeout=5)
-    except:
-        pass
-    try:
+        account = await get_account()
+        connection = account.get_rpc_connection()
+        await connection.connect()
+        await connection.wait_synchronized()
         if signal == "BUY":
-            return await connection.create_market_buy_order(symbol="XAUUSD", volume=lot, stop_loss=sl, take_profit=tp)
+            order = await connection.create_market_buy_order(symbol="XAUUSD", volume=lot, stop_loss=sl, take_profit=tp)
         else:
-            return await connection.create_market_sell_order(symbol="XAUUSD", volume=lot, stop_loss=sl, take_profit=tp)
-    finally: await connection.close()
+            order = await connection.create_market_sell_order(symbol="XAUUSD", volume=lot, stop_loss=sl, take_profit=tp)
+        await connection.close()
+        return order
+    except Exception as e:
+        print(f"Trade execution error: {e}")
+    return None
 
 MIN_STOP_DISTANCE = 1.10
 
@@ -168,7 +175,6 @@ async def run_all_strategies():
         signals.append((strat, sig))
     return ohlc, signals
 
-# Database helper with retry for locked DB
 def db_execute(statement, params=(), commit=False, fetch=False):
     for _ in range(5):
         try:
@@ -196,8 +202,7 @@ async def update_pending_trades():
     market_condition = market_classifier.classify(candles_1h) if candles_1h else "Unknown"
 
     trades = db_execute("SELECT id, pair, signal, entry, sl, tp, outcome, pnl, strategy_used FROM trade_journal WHERE outcome IS NULL", fetch=True)
-    if not trades:
-        return
+    if not trades: return
     for tid, pair, sig, entry, sl, tp, _, _, strat_name in trades:
         if entry is None: continue
         outcome = pnl = None
@@ -220,7 +225,6 @@ async def update_pending_trades():
                     "reward": pnl / 100
                 })
 
-# Nightly tasks unchanged
 async def nightly_tasks():
     while True:
         now = datetime.datetime.utcnow()
@@ -323,8 +327,20 @@ async def keep_alive_task():
         await asyncio.sleep(KEEPALIVE_INTERVAL_SEC)
 
 async def autonomous_trading_loop():
+    global _metaapi_healthy, _account_cache
     while True:
         try:
+            # If MetaApi was down, try to reconnect
+            if not _metaapi_healthy:
+                _account_cache = None
+                try:
+                    await get_account()
+                    _metaapi_healthy = True
+                    print("✅ MetaApi reconnected")
+                except:
+                    await asyncio.sleep(30)
+                    continue
+
             await update_pending_trades()
             ohlc, strategy_signals = await run_all_strategies()
             if ohlc is None:
@@ -387,12 +403,11 @@ async def autonomous_trading_loop():
             order = await execute_trade_async(decision_signal, sl, tp, lot)
             if order: print(f"✅ Master Auto trade ({strat_used}): {decision_signal} | Lot: {lot}")
             else: print("❌ Master Auto trade failed")
-        except (TimeoutException, Exception) as e:
-            print(f"Autonomous loop skipped: {e}")
-            # Clear cached account to force a fresh reconnect next time
-            global _account_cache
+        except Exception as e:
+            print(f"Autonomous loop error: {e}")
+            _metaapi_healthy = False
             _account_cache = None
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
 @app.on_event("startup")
@@ -447,22 +462,22 @@ async def weekly_scheduler():
         await asyncio.sleep(wait_seconds)
         await weekly_self_retraining(DB_PATH, active_strategies, master_agent, trade_memory, gemini_analyst, strategy_factory)
 
-# All dashboard routes unchanged (they are already complete)
+# Dashboard routes (MetaApi-independent – return cached data if MetaApi down)
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "autonomous_loop": "active", "strategies": [s.name for s in active_strategies], "gemini_available": gemini_analyst.available and gemini_analyst.disabled_until <= _time.time()}
+    return {"status": "ok", "autonomous_loop": "active", "metaapi_healthy": _metaapi_healthy, "strategies": [s.name for s in active_strategies], "gemini_available": gemini_analyst.available and gemini_analyst.disabled_until <= _time.time()}
 
 @app.get("/master-signal")
 async def master_signal():
     ohlc, strategy_signals = await run_all_strategies()
     if ohlc is None or strategy_signals is None:
         return {"decision": "HOLD", "probabilities": {"BUY": 0.33, "SELL": 0.33, "HOLD": 0.34},
-                "risk_brief": None, "strategy_used": "No data",
-                "gemini_advice": {"summary": "Market closed / no data"},
+                "risk_brief": None, "strategy_used": "MetaApi offline",
+                "gemini_advice": {"summary": "Market data unavailable"},
                 "market_trend": "Unknown",
                 "sweep_detected": False, "sweep_type": None, "mss": None, "fvg": None,
                 "current_price": 0, "strategy_signals": [], "master_decision": None}
