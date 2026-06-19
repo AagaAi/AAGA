@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Hourly Gemini Central Intelligence)
+# main.py – A.A.G.A AI (Hourly Gemini Intelligence – JSON‑Safe Fix)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -39,10 +39,9 @@ active_strategies = [ema_dmi_strat, ai_strat_instance]
 news_agent = NewsSentimentAgent()
 market_classifier = MarketClassifier()
 
-# If Gemini available, prepare strategy factory
+# Strategy factory only if Gemini available
 strategy_factory = StrategyFactory(gemini_analyst) if gemini_analyst.available else None
 
-# Stores the latest hourly insight for dashboard
 latest_hourly_insight = {"summary": "Waiting for first hourly analysis...", "timestamp": None}
 
 def run_news_analysis():
@@ -78,9 +77,7 @@ risk_manager = RiskManager()
 master_agent = MasterAgent(active_strategies, risk_manager.evaluate, run_news_analysis)
 trade_memory = TradeMemory(DB_PATH)
 
-# ============================================================
-# MetaApi singleton (with health flag)
-# ============================================================
+# MetaApi singleton with health flag
 _api_instance   = None
 _account_cache  = None
 _metaapi_healthy = True
@@ -136,7 +133,6 @@ async def execute_trade_async(signal, sl, tp, lot):
             return await connection.create_market_sell_order(symbol="XAUUSD", volume=lot, stop_loss=sl, take_profit=tp)
     finally: await connection.close()
 
-# ---------- Trading Engine ----------
 MIN_STOP_DISTANCE = 1.10
 
 async def get_strategy_signal(strat, ohlc):
@@ -201,11 +197,22 @@ async def update_pending_trades():
                 trade_memory.add_experience({"features": features, "action": action_map.get(sig, 2), "reward": pnl / 100})
 
 # ============================================================
-# Hourly Gemini Intelligence (One call per hour)
+# Hourly Gemini Intelligence (JSON‑safe parameters)
 # ============================================================
+def _json_safe_params(strat):
+    """Return a dict of only JSON‑serializable attributes of a strategy."""
+    safe = {}
+    for attr in dir(strat):
+        if attr.startswith('_') or callable(getattr(strat, attr)):
+            continue
+        val = getattr(strat, attr)
+        if isinstance(val, (int, float, str, bool, list, dict, tuple)):
+            safe[attr] = val
+    return safe
+
 async def hourly_gemini_intelligence():
     global latest_hourly_insight
-    await asyncio.sleep(5)  # let system start
+    await asyncio.sleep(5)
     while True:
         try:
             if not gemini_analyst.available or gemini_analyst.disabled_until > _time.time():
@@ -213,7 +220,6 @@ async def hourly_gemini_intelligence():
                 await asyncio.sleep(3600)
                 continue
 
-            # 1. Gather data
             trades_24h = db_execute("""
                 SELECT signal, entry, sl, tp, outcome, pnl, market_condition, timestamp 
                 FROM trade_journal 
@@ -229,38 +235,34 @@ async def hourly_gemini_intelligence():
                 ema50 = pd.Series(closes_1h).ewm(span=50).mean().iloc[-1] if len(closes_1h) >= 50 else sum(closes_1h)/len(closes_1h)
                 market_state = f"Price: {closes_1h[-1]:.2f}, Trend: {'UPTREND' if closes_1h[-1] > ema50 else 'DOWNTREND'}"
             
-            # Current strategy parameters
+            # Build JSON‑safe strategy parameters
             strategy_params = {}
             for strat in active_strategies:
-                params = {k: v for k, v in vars(strat).items() if not k.startswith('_') and not callable(v)}
-                strategy_params[strat.name] = params
+                strategy_params[strat.name] = _json_safe_params(strat)
 
-            # 2. Build prompt
             prompt = f"""
 You are A.A.G.A AI's central intelligence. Analyze the following comprehensive data and provide a single JSON response with these keys:
 - "performance_summary": brief assessment of recent trades (win rate, P&L, market condition).
-- "parameter_adjustments": dict of strategy name -> dict of parameters to change (e.g., {{"EMA+DMI+BOS": {{"adx_threshold": 18}}}}). Only include if needed.
-- "suggested_trade": {{"action": "BUY"/"SELL"/"HOLD", "entry": price, "sl": price, "tp": price, "confidence": 0.0-1.0}}. Base on current market.
-- "new_strategy_params": optional, provide a complete strategy definition like the factory format (name, buy_conditions, sell_conditions, sl_atr_multiplier, tp_atr_multiplier, min_stop_distance). Only if you detect a profitable new pattern.
+- "parameter_adjustments": dict of strategy name -> dict of parameters to change. Only include if needed.
+- "suggested_trade": {{"action": "BUY"/"SELL"/"HOLD", "entry": price, "sl": price, "tp": price, "confidence": 0.0-1.0}}.
+- "new_strategy_params": optional, provide a complete strategy definition like the factory format (name, buy_conditions, sell_conditions, sl_atr_multiplier, tp_atr_multiplier, min_stop_distance).
 - "market_outlook": short sentence about next 1 hour.
 
 Data:
-Recent Trades (last 24h): {json.dumps(trades_24h[:30], default=str)}
+Recent Trades: {json.dumps(trades_24h[:30], default=str)}
 Current Market: {market_state}
-News Sentiment: {json.dumps(news_result)}
-Current Strategy Parameters: {json.dumps(strategy_params)}
+News: {json.dumps(news_result)}
+Strategy Parameters: {json.dumps(strategy_params)}
 Active Strategies: {[s.name for s in active_strategies]}
 
-Respond ONLY with the JSON. No other text.
+Respond ONLY with the JSON.
 """
-            # 3. Call Gemini
             response = gemini_analyst._safe_generate(prompt)
             if not response:
                 print("❌ Hourly Gemini call failed")
                 await asyncio.sleep(3600)
                 continue
 
-            # 4. Parse response
             try:
                 if "```json" in response:
                     response = response.split("```json")[1].split("```")[0].strip()
@@ -272,10 +274,8 @@ Respond ONLY with the JSON. No other text.
                 await asyncio.sleep(3600)
                 continue
 
-            # 5. Apply insights
             print(f"🧠 Hourly Gemini Insight: {insight.get('performance_summary', 'No summary')}")
             
-            # Update parameters
             param_adjustments = insight.get("parameter_adjustments", {})
             for strat_name, params in param_adjustments.items():
                 for strat in active_strategies:
@@ -285,7 +285,6 @@ Respond ONLY with the JSON. No other text.
                                 setattr(strat, key, val)
                                 print(f"  🔧 {strat_name}: {key} = {val}")
             
-            # Add new strategy if provided
             new_strat = insight.get("new_strategy_params")
             if new_strat and strategy_factory:
                 try:
@@ -297,11 +296,9 @@ Respond ONLY with the JSON. No other text.
                 except Exception as e:
                     print(f"  ⚠️ Failed to create new strategy: {e}")
             
-            # Store for dashboard
             insight["timestamp"] = datetime.datetime.utcnow().isoformat()
             latest_hourly_insight = insight
             
-            # Log to agent_log
             hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
             db_execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                        (hour, "A.A.G.A Gemini (Hourly)", "HOURLY_INSIGHT", 1.0, json.dumps(insight)), commit=True)
@@ -309,10 +306,10 @@ Respond ONLY with the JSON. No other text.
         except Exception as e:
             print(f"Hourly intelligence error: {e}")
         
-        await asyncio.sleep(3600)  # Every hour
+        await asyncio.sleep(3600)
 
 # ============================================================
-# Autonomous Trading Loop (unchanged)
+# Autonomous Trading Loop + Keep‑alive
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -397,7 +394,7 @@ async def autonomous_trading_loop():
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
 # ============================================================
-# Nightly tasks (now without Gemini calls – they are hourly)
+# Nightly tasks (retrain + weight update)
 # ============================================================
 async def nightly_tasks():
     while True:
@@ -405,12 +402,10 @@ async def nightly_tasks():
         next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
         await asyncio.sleep((next_midnight - now).total_seconds())
 
-        # Retrain RandomForest
         if trade_memory.retrain_model(ai_strat_instance.model):
             ai_strat_instance.trained = True
             print("✅ RandomForest retrained (nightly)")
 
-        # Update master agent weights based on yesterday's performance
         rows = db_execute("""
             SELECT strategy_used, COUNT(*) as total,
                    SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins
@@ -425,7 +420,7 @@ async def nightly_tasks():
                 master_agent.update_performance(name, win_rate)
 
 # ============================================================
-# Weekly self‑retraining (unchanged)
+# Weekly self‑retraining
 # ============================================================
 async def weekly_scheduler():
     while True:
@@ -438,9 +433,6 @@ async def weekly_scheduler():
         await asyncio.sleep((next_sunday - now).total_seconds())
         await weekly_self_retraining(DB_PATH, active_strategies, master_agent, trade_memory, gemini_analyst, strategy_factory)
 
-# ============================================================
-# Startup
-# ============================================================
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(keep_alive_task())
@@ -449,9 +441,6 @@ async def startup():
     asyncio.create_task(weekly_scheduler())
     asyncio.create_task(hourly_gemini_intelligence())
 
-# ============================================================
-# Database init
-# ============================================================
 def init_db():
     con = sqlite3.connect(DB_PATH)
     try: con.execute("ALTER TABLE trade_journal ADD COLUMN market_condition TEXT DEFAULT 'Unknown'")
@@ -484,9 +473,7 @@ def init_db():
     con.close()
 init_db()
 
-# ============================================================
-# Routes
-# ============================================================
+# Dashboard routes (unchanged, except /ai-insights uses latest_hourly_insight)
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
@@ -521,7 +508,6 @@ async def master_signal():
         entry = master_decision["entry_zone"][0] if master_decision["signal"]=="BUY" else master_decision["entry_zone"][1]
         risk_brief = {"entry": round(entry,2), "sl": master_decision["sl"], "tp": master_decision["tp"]}
 
-    # Log
     now = datetime.datetime.utcnow()
     db_execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                (now.strftime("%Y-%m-%d %H:00"), "A.A.G.A Master", master_decision["signal"], conf, json.dumps(master_decision)), commit=True)
