@@ -1,5 +1,5 @@
-# main.py – A.A.G.A AI (Complete Dashboard with Agent Activity, Weekly Backtest, All Strategies)
-import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
+# main.py – A.A.G.A AI (Complete & Final)
+import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,7 +42,7 @@ market_classifier = MarketClassifier()
 # Strategy factory only if Gemini available
 strategy_factory = StrategyFactory(gemini_analyst) if gemini_analyst.available else None
 
-# Store the latest signal from autonomous loop for dashboard fallback
+# Store latest signal for dashboard fallback
 latest_signal_cache = {
     "decision": "HOLD",
     "probabilities": {"BUY": 0.33, "SELL": 0.33, "HOLD": 0.34},
@@ -121,7 +121,9 @@ async def sdk_get_candles_async(symbol: str, timeframe: str, limit: int = 500):
         return [{"time": str(c.get("time", "")), "open": float(c.get("open", 0)), "high": float(c.get("high", 0)),
                  "low": float(c.get("low", 0)), "close": float(c.get("close", 0)),
                  "volume": float(c.get("tickVolume", c.get("volume", 0)))} for c in candles_raw]
-    except Exception as e: print(f"SDK fetch error: {e}"); return None
+    except Exception as e:
+        print(f"SDK fetch error: {e}")
+        return None
 
 async def sdk_get_price_async(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
@@ -132,7 +134,8 @@ async def sdk_get_price_async(symbol: str):
         price = await connection.get_symbol_price(symbol=symbol)
         await connection.close()
         if price: return (float(price.get("bid", 0)) + float(price.get("ask", 0))) / 2
-    except: pass
+    except:
+        pass
     return None
 
 async def execute_trade_async(signal, sl, tp, lot):
@@ -147,7 +150,9 @@ async def execute_trade_async(signal, sl, tp, lot):
             order = await connection.create_market_sell_order(symbol="XAUUSD", volume=lot, stop_loss=sl, take_profit=tp)
         await connection.close()
         return order
-    except: return None
+    except Exception as e:
+        print(f"Trade execution error: {e}")
+    return None
 
 MIN_STOP_DISTANCE = 1.10
 
@@ -168,6 +173,7 @@ async def run_all_strategies():
         signals.append((strat, sig))
     return ohlc, signals
 
+# Database helper with retry for locked DB
 def db_execute(statement, params=(), commit=False, fetch=False):
     for _ in range(5):
         try:
@@ -182,8 +188,10 @@ def db_execute(statement, params=(), commit=False, fetch=False):
             con.close()
             return result
         except sqlite3.OperationalError as e:
-            if "locked" in str(e): _time.sleep(0.2)
-            else: raise
+            if "locked" in str(e):
+                _time.sleep(0.2)
+            else:
+                raise
     return None
 
 async def update_pending_trades():
@@ -246,10 +254,10 @@ async def gemini_intelligence_cycle():
                                    (hour, "A.A.G.A Gemini", "INTELLIGENCE", 1.0, json.dumps(daily_insight)), commit=True)
         except Exception as e:
             print(f"Gemini cycle error: {e}")
-        await asyncio.sleep(21600)
+        await asyncio.sleep(21600)  # 6 hours
 
 # ============================================================
-# Autonomous Trading Loop (updates latest_signal_cache)
+# Autonomous Trading Loop + Keep‑alive
 # ============================================================
 AUTONOMOUS_INTERVAL_SEC = 60
 KEEPALIVE_INTERVAL_SEC  = 180
@@ -274,6 +282,7 @@ async def autonomous_trading_loop():
                 try:
                     await get_account()
                     _metaapi_healthy = True
+                    print("✅ MetaApi reconnected")
                 except:
                     await asyncio.sleep(30)
                     continue
@@ -297,7 +306,7 @@ async def autonomous_trading_loop():
             final_decision = master_agent.decide(signal_dicts)
             decision_signal = final_decision["signal"]
 
-            # Update global cache for dashboard (always, even if HOLD)
+            # Update global cache for dashboard
             conf = final_decision.get("confidence", 0.5)
             probs = {"BUY": conf if decision_signal=="BUY" else 0,
                      "SELL": conf if decision_signal=="SELL" else 0,
@@ -325,6 +334,10 @@ async def autonomous_trading_loop():
                 prob = 0.8 if act in ("BUY","SELL") else 0.3
                 db_execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
                            (hour, f"Agent {s['name']}", act, prob, json.dumps(s)), commit=True)
+
+            # Log master decision
+            db_execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
+                       (hour, "A.A.G.A Master", decision_signal, conf, json.dumps(final_decision)), commit=True)
 
             # Trade execution
             if decision_signal in ("BUY", "SELL"):
@@ -371,7 +384,7 @@ async def nightly_tasks():
         await asyncio.sleep((next_midnight - now).total_seconds())
         if trade_memory.retrain_model(ai_strat_instance.model):
             ai_strat_instance.trained = True
-            print("✅ RandomForest retrained")
+            print("✅ RandomForest retrained (nightly)")
         rows = db_execute("""
             SELECT strategy_used, COUNT(*) as total,
                    SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins
@@ -520,10 +533,30 @@ def strategy_performance():
             result[name] = {"total_trades": total, "wins": wins, "losses": losses, "win_rate": round(win_rate,1), "pnl": round(r[4] or 0,2)}
     return result
 
+@app.get("/market-condition-performance")
+def market_condition_performance():
+    rows = db_execute("""
+        SELECT market_condition, COUNT(*) as total,
+               SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as losses,
+               SUM(pnl) as total_pnl
+        FROM trade_journal WHERE date(timestamp) = date('now') AND outcome IS NOT NULL AND market_condition IS NOT NULL
+        GROUP BY market_condition
+    """, fetch=True)
+    result = {}
+    if rows:
+        for r in rows:
+            cond = r[0] or "Unknown"; total = r[1]; wins = r[2] or 0; losses = r[3] or 0
+            win_rate = wins / total * 100 if total > 0 else 0
+            result[cond] = {"total_trades": total, "wins": wins, "losses": losses, "win_rate": round(win_rate,1), "pnl": round(r[4] or 0,2)}
+    return result
+
 @app.get("/weekly-backtest")
 async def weekly_backtest():
-    # Returns backtest of last 7 days (using compare_strategies but we can customize)
-    return await compare_strategies()
+    try:
+        return await compare_strategies()
+    except Exception as e:
+        return {"error": f"Backtest failed: {str(e)}"}
 
 @app.get("/ai-insights")
 async def ai_insights():
