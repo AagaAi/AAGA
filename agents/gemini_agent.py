@@ -7,20 +7,19 @@ class GeminiAnalyst:
     def __init__(self, api_key: str = ""):
         self.available = False
         self.consecutive_errors = 0
-        self.max_errors = 3
+        self.max_errors = 2
         self.disabled_until = 0
         self.last_call = 0
-        self.call_interval = 5
+        self.call_interval = 10
         key = api_key or os.environ.get("GEMINI_API_KEY", "")
         if not key:
             self.error = "GEMINI_API_KEY not set"
             return
         try:
             genai.configure(api_key=key)
-            # Use full model path for v1beta (works with google-generativeai)
             self.model = genai.GenerativeModel("models/gemini-2.0-flash")
             self.available = True
-            print("✅ Gemini 2.0 Flash connected")
+            print("✅ Gemini 2.0 Flash connected (quota‑safe mode)")
         except Exception as e:
             self.error = str(e)
 
@@ -55,7 +54,7 @@ class GeminiAnalyst:
             return {"summary": "Gemini unavailable or no trades", "recommendations": []}
         prompt = f"""
 You are a senior quantitative analyst. Below are today's completed XAUUSD trades:
-{json.dumps(trades[:50], default=str)}
+{json.dumps(trades[:10], default=str)}
 
 Analyze them. Identify:
 1. Main patterns leading to wins/losses.
