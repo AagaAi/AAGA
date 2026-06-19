@@ -10,8 +10,8 @@ warnings.filterwarnings('ignore')
 class RandomForestStrategy:
     """
     Self-learning strategy using Random Forest.
-    Trains on historical OHLC patterns and weekly outcome labels.
-    Lightweight – works perfectly on Render free tier.
+    Fallback: simple trend following if model not trained.
+    TP = AI's own calculation minus tp_reduction_points (to account for spread/slippage).
     """
     def __init__(self, config=None):
         self.name = "RandomForest"
@@ -19,6 +19,10 @@ class RandomForestStrategy:
         self.trained = False
         self.feature_window = 10
         self.balance = 10000.0
+        self.min_stop_distance = 1.10
+        self.atr_multiplier_sl = 1.5
+        self.atr_multiplier_tp = 2.0
+        self.tp_reduction_points = 2.10   # subtract from calculated TP
 
     def _make_features(self, ohlc_dict):
         """Build feature vector from last 10 candles."""
@@ -39,7 +43,6 @@ class RandomForestStrategy:
                 (closes.iloc[-i] - closes.iloc[-i-1]) / 10,
                 (highs.iloc[-i] - lows.iloc[-i]) / 10,
             ])
-        # Add SMA differences
         sma5 = closes.rolling(5).mean().iloc[-1] / 2000
         sma10 = closes.rolling(10).mean().iloc[-1] / 2000
         features.extend([sma5, sma10, closes.iloc[-1] / closes.rolling(20).mean().iloc[-1]])
@@ -47,10 +50,7 @@ class RandomForestStrategy:
         return np.array(features).reshape(1, -1), current_price
 
     def train_from_trades(self, trade_journal):
-        """
-        Learn from past trades: each trade -> features at entry, label = BUY/SELL/HOLD.
-        This can be called weekly with all completed trades.
-        """
+        """Learn from past trades (features + action labels)."""
         if len(trade_journal) < 10:
             return
         X, y = [], []
@@ -71,41 +71,37 @@ class RandomForestStrategy:
             else:
                 y.append(2)
             X.append(features)
-        if len(set(y)) < 2:  # need at least two classes
-            return
-        self.model.fit(X, y)
-        self.trained = True
+        if len(set(y)) >= 2 and len(X) >= 10:
+            self.model.fit(X, y)
+            self.trained = True
 
     def get_signal(self, ohlc_dict):
         """
         Return signal dict like strategy_agent.
-        If trained, use model; else fallback to trend.
+        TP = AI's own calculation minus tp_reduction_points.
         """
         closes = pd.Series(ohlc_dict['closes'])
         current_price = closes.iloc[-1]
 
-        if not self.trained:
-            # Fallback: simple trend following
-            trend = "UPTREND" if closes.iloc[-1] > closes.iloc[-20] else "DOWNTREND"
-            return {
-                "signal": "HOLD",
-                "entry_zone": None, "sl": None, "tp": None,
-                "trend": trend, "current_price": current_price
-            }
+        signal = "HOLD"
 
-        features, price = self._make_features(ohlc_dict)
-        if features is None:
-            return {
-                "signal": "HOLD",
-                "entry_zone": None, "sl": None, "tp": None,
-                "trend": "Unknown", "current_price": current_price
-            }
+        if self.trained:
+            features, price = self._make_features(ohlc_dict)
+            if features is not None:
+                pred = self.model.predict(features)[0]  # 0=BUY, 1=SELL, 2=HOLD
+                signal_map = {0: "BUY", 1: "SELL", 2: "HOLD"}
+                signal = signal_map.get(pred, "HOLD")
 
-        pred = self.model.predict(features)[0]  # 0=BUY, 1=SELL, 2=HOLD
-        signal_map = {0: "BUY", 1: "SELL", 2: "HOLD"}
-        signal = signal_map.get(pred, "HOLD")
+        # Fallback: if still HOLD, use simple EMA cross
+        if signal == "HOLD":
+            ema8 = closes.ewm(span=8).mean().iloc[-1]
+            ema21 = closes.ewm(span=21).mean().iloc[-1]
+            if ema8 > ema21 and current_price > ema21:
+                signal = "BUY"
+            elif ema8 < ema21 and current_price < ema21:
+                signal = "SELL"
 
-        # Calculate SL/TP based on ATR
+        # Calculate SL/TP
         highs = pd.Series(ohlc_dict['highs'])
         lows  = pd.Series(ohlc_dict['lows'])
         atr = (highs.iloc[-14:].max() - lows.iloc[-14:].min()) / 2
@@ -114,15 +110,24 @@ class RandomForestStrategy:
 
         sl = tp = entry_zone = None
         if signal == "BUY":
-            sl = current_price - 1.5 * atr
-            tp = current_price + 2.0 * atr
+            # SL below entry by 1.5 * ATR, but not closer than min_stop_distance
+            sl = current_price - max(self.atr_multiplier_sl * atr, self.min_stop_distance)
+            # TP = entry + (2.0 * ATR) - tp_reduction_points
+            tp_raw = current_price + self.atr_multiplier_tp * atr
+            tp = tp_raw - self.tp_reduction_points
+            # Ensure TP is still above entry + min_stop_distance
+            if tp <= current_price + self.min_stop_distance:
+                tp = current_price + self.min_stop_distance + 0.5
             entry_zone = (current_price, current_price)
         elif signal == "SELL":
-            sl = current_price + 1.5 * atr
-            tp = current_price - 2.0 * atr
+            sl = current_price + max(self.atr_multiplier_sl * atr, self.min_stop_distance)
+            tp_raw = current_price - self.atr_multiplier_tp * atr
+            tp = tp_raw + self.tp_reduction_points   # for SELL, TP is lower; adding reduction makes it less negative (closer to entry)
+            if tp >= current_price - self.min_stop_distance:
+                tp = current_price - self.min_stop_distance - 0.5
             entry_zone = (current_price, current_price)
 
-        trend = "UPTREND" if closes.iloc[-1] > closes.iloc[-20] else "DOWNTREND"
+        trend = "UPTREND" if current_price > closes.ewm(span=50).mean().iloc[-1] else "DOWNTREND"
         return {
             "signal": signal,
             "entry_zone": entry_zone,
