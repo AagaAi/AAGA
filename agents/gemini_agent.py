@@ -10,16 +10,17 @@ class GeminiAnalyst:
         self.max_errors = 3
         self.disabled_until = 0
         self.last_call = 0
-        self.call_interval = 5  # seconds between calls (throttle)
+        self.call_interval = 5
         key = api_key or os.environ.get("GEMINI_API_KEY", "")
         if not key:
             self.error = "GEMINI_API_KEY not set"
             return
         try:
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel("gemini-1.5-flash")
+            # Use full model path for v1beta (works with google-generativeai)
+            self.model = genai.GenerativeModel("models/gemini-2.0-flash")
             self.available = True
-            print("✅ Gemini 1.5 Flash connected")
+            print("✅ Gemini 2.0 Flash connected")
         except Exception as e:
             self.error = str(e)
 
