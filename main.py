@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Complete Dashboard Routes + DB Lock Fix)
+# main.py – A.A.G.A AI (MetaApi Timeout Resilient)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import pandas as pd
 from metaapi_cloud_sdk import MetaApi
+from metaapi_cloud_sdk.clients.timeout_exception import TimeoutException
 from agents.gemini_agent import GeminiAnalyst
 from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
@@ -83,17 +84,24 @@ if gemini_analyst.available:
 else:
     print("⚠️ Gemini unavailable – Strategy Factory disabled")
 
-# MetaApi singleton (async)
+# MetaApi singleton with timeout resilience
 _api_instance   = None
 _account_cache  = None
 
 async def get_account():
     global _api_instance, _account_cache
-    if _account_cache is not None: return _account_cache
+    if _account_cache is not None:
+        return _account_cache
     _api_instance  = MetaApi(METAAPI_TOKEN)
     account        = await _api_instance.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
-    if account.state not in ('DEPLOYING', 'DEPLOYED'): await account.deploy()
-    await account.wait_connected()
+    if account.state not in ('DEPLOYING', 'DEPLOYED'):
+        await account.deploy()
+    try:
+        # Shorter timeout (10 seconds) to avoid blocking the whole loop
+        await account.wait_connected(timeout=10)
+    except Exception as e:
+        print(f"⚠️ MetaApi connection timeout ({e}). Will retry later.")
+        raise
     _account_cache = account
     return account
 
@@ -114,7 +122,11 @@ async def sdk_get_price_async(symbol: str):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
     account = await get_account()
     connection = account.get_rpc_connection()
-    await connection.connect(); await connection.wait_synchronized()
+    await connection.connect()
+    try:
+        await connection.wait_synchronized(timeout=5)
+    except:
+        pass
     try:
         price = await connection.get_symbol_price(symbol=symbol)
         if price: return (float(price.get("bid", 0)) + float(price.get("ask", 0))) / 2
@@ -125,7 +137,11 @@ async def execute_trade_async(signal, sl, tp, lot):
     if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID: return None
     account = await get_account()
     connection = account.get_rpc_connection()
-    await connection.connect(); await connection.wait_synchronized()
+    await connection.connect()
+    try:
+        await connection.wait_synchronized(timeout=5)
+    except:
+        pass
     try:
         if signal == "BUY":
             return await connection.create_market_buy_order(symbol="XAUUSD", volume=lot, stop_loss=sl, take_profit=tp)
@@ -204,7 +220,7 @@ async def update_pending_trades():
                     "reward": pnl / 100
                 })
 
-# Nightly tasks unchanged (use db_execute where needed)
+# Nightly tasks unchanged
 async def nightly_tasks():
     while True:
         now = datetime.datetime.utcnow()
@@ -353,7 +369,6 @@ async def autonomous_trading_loop():
                     print("⚠️ Invalid stops, skipping")
                     continue
 
-            # Check existing trade with retry
             existing = db_execute("SELECT COUNT(*) FROM trade_journal WHERE outcome IS NULL AND signal = ?", (decision_signal,), fetch=True)
             if existing and existing[0][0] > 0:
                 print("⏩ Same direction open trade exists, skipping")
@@ -372,8 +387,12 @@ async def autonomous_trading_loop():
             order = await execute_trade_async(decision_signal, sl, tp, lot)
             if order: print(f"✅ Master Auto trade ({strat_used}): {decision_signal} | Lot: {lot}")
             else: print("❌ Master Auto trade failed")
-        except Exception as e:
-            print(f"Autonomous loop error: {e}")
+        except (TimeoutException, Exception) as e:
+            print(f"Autonomous loop skipped: {e}")
+            # Clear cached account to force a fresh reconnect next time
+            global _account_cache
+            _account_cache = None
+            await asyncio.sleep(10)
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
 @app.on_event("startup")
@@ -428,7 +447,7 @@ async def weekly_scheduler():
         await asyncio.sleep(wait_seconds)
         await weekly_self_retraining(DB_PATH, active_strategies, master_agent, trade_memory, gemini_analyst, strategy_factory)
 
-# ========== ALL DASHBOARD ROUTES ==========
+# All dashboard routes unchanged (they are already complete)
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
