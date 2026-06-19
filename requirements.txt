@@ -6,7 +6,7 @@ requests
 pydantic
 metaapi-cloud-sdk
 aiohttp
-google-genai
+google-generativeai
 scikit-learn
 matplotlib
 feedparser
