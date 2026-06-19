@@ -7,7 +7,7 @@ class GeminiAnalyst:
     def __init__(self, api_key: str = ""):
         self.available = False
         self.last_call = 0
-        self.call_interval = 10        # seconds (not used now, but keep for internal throttling)
+        self.call_interval = 10        # not used, kept for compatibility
         self.consecutive_errors = 0
         self.max_errors = 2
         self.disabled_until = 0
@@ -17,8 +17,8 @@ class GeminiAnalyst:
             return
         try:
             self.client = genai.Client(api_key=key)
-            # Use 1.5 Flash (free tier available, high quota)
-            self.model = "gemini-1.5-flash"
+            # Use gemini-2.0-flash (stable, free tier)
+            self.model = "gemini-2.0-flash"
             self.available = True
         except Exception as e:
             self.error = str(e)
@@ -46,18 +46,18 @@ class GeminiAnalyst:
             self.consecutive_errors += 1
             print(f"Gemini API error: {e}")
             if self.consecutive_errors >= self.max_errors:
-                # Disable for 1 hour
-                self.disabled_until = _time.time() + 3600
-                print("⚠️ Gemini disabled for 1 hour due to repeated errors")
+                # Disable for 30 minutes
+                self.disabled_until = _time.time() + 1800
+                print("⚠️ Gemini disabled for 30 minutes due to repeated errors")
             return None
 
     def analyze_daily_trades(self, trades: list) -> dict:
-        # (not used in hourly, but kept for compatibility)
+        # Not used in the hourly cycle, but kept for compatibility
         if not self.available or not trades:
             return {"summary": "Gemini unavailable or no trades", "recommendations": []}
         prompt = f"""
 You are a senior quantitative analyst. Below are today's completed XAUUSD trades:
-{json.dumps(trades, default=str)}
+{json.dumps(trades[:50], default=str)}
 
 Analyze them. Identify:
 1. Main patterns leading to wins/losses.
