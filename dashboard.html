@@ -243,10 +243,16 @@
     loadExplainableAI();
   }
 
+  // ------------------------------------------------------------
+  //  fetchAll() – the only place where connectionStatus is updated
+  // ------------------------------------------------------------
   async function fetchAll() {
     try {
       const signalRes = await fetch(`/master-signal?pair=${currentPair}`);
+      if (!signalRes.ok) throw new Error("Master signal endpoint returned " + signalRes.status);
       const d = await signalRes.json();
+      document.getElementById('connectionStatus').innerHTML = '● ONLINE';
+
       document.getElementById('currentPrice').innerText = d.current_price ? '$' + d.current_price.toFixed(2) : '$----.--';
       document.getElementById('marketTrend').innerText = d.market_trend || 'Unknown';
       document.getElementById('marketPhase').innerText = 'Phase: ' + (d.market_trend || '--');
@@ -288,6 +294,7 @@
       }
       document.getElementById('strategySignalsContainer').innerHTML = strategyHtml;
 
+      // Agent logs
       const logRes = await fetch('/agent-log');
       const logs = await logRes.json();
       let logHtml = '';
@@ -300,6 +307,7 @@
       });
       document.getElementById('agentLogContainer').innerHTML = logHtml || 'No agent activity';
 
+      // Today's trades
       const tradesRes = await fetch(`/today-trades?pair=${currentPair}`);
       const trades = await tradesRes.json();
       let tradesHtml = '<table><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Strategy</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th><th>Market</th></tr>';
@@ -321,6 +329,7 @@
       tradesHtml += '</table>';
       document.getElementById('tradesTable').innerHTML = trades.length ? tradesHtml : 'No trades today';
 
+      // Trade reviews
       const reviewsRes = await fetch(`/trade-reviews?pair=${currentPair}`);
       const reviews = await reviewsRes.json();
       let reviewHtml = '';
@@ -335,12 +344,15 @@
       document.getElementById('tradeReviews').innerHTML = reviewHtml || 'No reviews yet';
       document.getElementById('lastUpdate').innerText = 'Last update: ' + new Date().toLocaleTimeString();
     } catch (e) {
-      console.error(e);
+      // Only here we set OFFLINE because master-signal is critical
       document.getElementById('connectionStatus').innerHTML = '● OFFLINE';
+      console.error(e);
     }
   }
 
-  // ... keep all other load functions (same as before) ...
+  // ------------------------------------------------------------
+  //  Helper loaders – they never touch connectionStatus
+  // ------------------------------------------------------------
   async function loadDailyStrategyStats() {
     const container = document.getElementById('dailyStrategyStats');
     container.innerHTML = 'Loading...';
@@ -425,6 +437,7 @@
     } catch(e) { container.innerHTML = 'Failed to load explanation'; }
   }
 
+  // initial load
   fetchAll();
   loadDailyStrategyStats();
   loadWeeklyBacktest();
@@ -433,6 +446,7 @@
   loadEconomicCalendar();
   loadExplainableAI();
 
+  // refresh intervals
   setInterval(fetchAll, 30000);
   setInterval(loadDailyStrategyStats, 60000);
   setInterval(loadMarketConditionStats, 60000);
