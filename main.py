@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Hourly Gemini Intelligence – JSON‑Safe Fix)
+# main.py – A.A.G.A AI (Complete, Stable, with 3‑Hour Gemini Intelligence)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -42,7 +42,8 @@ market_classifier = MarketClassifier()
 # Strategy factory only if Gemini available
 strategy_factory = StrategyFactory(gemini_analyst) if gemini_analyst.available else None
 
-latest_hourly_insight = {"summary": "Waiting for first hourly analysis...", "timestamp": None}
+# Stores the latest hourly insight for dashboard
+latest_hourly_insight = {"summary": "Waiting for first analysis...", "timestamp": None}
 
 def run_news_analysis():
     result = news_agent.analyze()
@@ -152,7 +153,7 @@ async def run_all_strategies():
         signals.append((strat, sig))
     return ohlc, signals
 
-# Database helper with retry
+# Database helper with retry for locked DB
 def db_execute(statement, params=(), commit=False, fetch=False):
     for _ in range(5):
         try:
@@ -197,7 +198,7 @@ async def update_pending_trades():
                 trade_memory.add_experience({"features": features, "action": action_map.get(sig, 2), "reward": pnl / 100})
 
 # ============================================================
-# Hourly Gemini Intelligence (JSON‑safe parameters)
+# Hourly Gemini Intelligence (now every 3 hours – 10800 sec)
 # ============================================================
 def _json_safe_params(strat):
     """Return a dict of only JSON‑serializable attributes of a strategy."""
@@ -216,8 +217,8 @@ async def hourly_gemini_intelligence():
     while True:
         try:
             if not gemini_analyst.available or gemini_analyst.disabled_until > _time.time():
-                print("⏳ Gemini unavailable for hourly analysis")
-                await asyncio.sleep(3600)
+                print("⏳ Gemini unavailable for intelligence cycle")
+                await asyncio.sleep(10800)
                 continue
 
             trades_24h = db_execute("""
@@ -246,7 +247,7 @@ You are A.A.G.A AI's central intelligence. Analyze the following comprehensive d
 - "parameter_adjustments": dict of strategy name -> dict of parameters to change. Only include if needed.
 - "suggested_trade": {{"action": "BUY"/"SELL"/"HOLD", "entry": price, "sl": price, "tp": price, "confidence": 0.0-1.0}}.
 - "new_strategy_params": optional, provide a complete strategy definition like the factory format (name, buy_conditions, sell_conditions, sl_atr_multiplier, tp_atr_multiplier, min_stop_distance).
-- "market_outlook": short sentence about next 1 hour.
+- "market_outlook": short sentence about next few hours.
 
 Data:
 Recent Trades: {json.dumps(trades_24h[:30], default=str)}
@@ -259,8 +260,8 @@ Respond ONLY with the JSON.
 """
             response = gemini_analyst._safe_generate(prompt)
             if not response:
-                print("❌ Hourly Gemini call failed")
-                await asyncio.sleep(3600)
+                print("❌ Gemini call failed")
+                await asyncio.sleep(10800)
                 continue
 
             try:
@@ -271,10 +272,10 @@ Respond ONLY with the JSON.
                 insight = json.loads(response)
             except Exception as e:
                 print(f"❌ Gemini response parse error: {e}")
-                await asyncio.sleep(3600)
+                await asyncio.sleep(10800)
                 continue
 
-            print(f"🧠 Hourly Gemini Insight: {insight.get('performance_summary', 'No summary')}")
+            print(f"🧠 Gemini Insight: {insight.get('performance_summary', 'No summary')}")
             
             param_adjustments = insight.get("parameter_adjustments", {})
             for strat_name, params in param_adjustments.items():
@@ -301,12 +302,12 @@ Respond ONLY with the JSON.
             
             hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:00")
             db_execute("INSERT INTO agent_log (hour, agent, action, prob, details) VALUES (?,?,?,?,?)",
-                       (hour, "A.A.G.A Gemini (Hourly)", "HOURLY_INSIGHT", 1.0, json.dumps(insight)), commit=True)
+                       (hour, "A.A.G.A Gemini", "INTELLIGENCE", 1.0, json.dumps(insight)), commit=True)
 
         except Exception as e:
-            print(f"Hourly intelligence error: {e}")
+            print(f"Intelligence cycle error: {e}")
         
-        await asyncio.sleep(3600)
+        await asyncio.sleep(10800)   # every 3 hours
 
 # ============================================================
 # Autonomous Trading Loop + Keep‑alive
@@ -473,7 +474,7 @@ def init_db():
     con.close()
 init_db()
 
-# Dashboard routes (unchanged, except /ai-insights uses latest_hourly_insight)
+# Dashboard routes
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return FileResponse("dashboard.html")
