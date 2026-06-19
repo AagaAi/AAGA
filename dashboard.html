@@ -282,11 +282,11 @@
     <button onclick="loadDailyStrategyStats()">Refresh Daily Stats</button>
   </div>
 
-  <!-- Monthly Backtest Comparison -->
+  <!-- Weekly Backtest -->
   <div class="card" style="margin-bottom:30px;">
-    <h3>📊 Strategy Performance (Last Month Backtest)</h3>
-    <div id="strategyCompare">--</div>
-    <button onclick="loadStrategyCompare()">Refresh Comparison</button>
+    <h3>📊 Weekly Backtest (Last 7 Days)</h3>
+    <div id="weeklyBacktest">--</div>
+    <button onclick="loadWeeklyBacktest()">Refresh Weekly Backtest</button>
   </div>
 
   <!-- Market Condition Performance -->
@@ -441,11 +441,11 @@
     }
   }
 
-  async function loadStrategyCompare() {
-    const container = document.getElementById('strategyCompare');
+  async function loadWeeklyBacktest() {
+    const container = document.getElementById('weeklyBacktest');
     container.innerHTML = 'Loading...';
     try {
-      const res = await fetch('/compare-strategies');
+      const res = await fetch('/weekly-backtest');
       const data = await res.json();
       if (data.error) {
         container.innerHTML = `<span style="color:#ff4466;">${data.error}</span>`;
@@ -462,7 +462,7 @@
       }
       container.innerHTML = html || 'No data';
     } catch(e) {
-      container.innerHTML = '<span style="color:#ff4466;">Failed to load comparison</span>';
+      container.innerHTML = '<span style="color:#ff4466;">Failed to load weekly backtest</span>';
       console.error(e);
     }
   }
@@ -501,13 +501,14 @@
   // Initial load and refresh intervals
   fetchAll();
   loadDailyStrategyStats();
-  loadStrategyCompare();
+  loadWeeklyBacktest();
   loadMarketConditionStats();
   loadAiInsights();
   setInterval(fetchAll, 30000);
   setInterval(loadDailyStrategyStats, 60000);
   setInterval(loadMarketConditionStats, 60000);
-  setInterval(loadAiInsights, 300000); // every 5 min
+  setInterval(loadAiInsights, 300000);
+  setInterval(loadWeeklyBacktest, 300000);
 </script>
 </body>
 </html>
