@@ -131,14 +131,13 @@
     <span class="status-pill" id="connectionStatus">● ONLINE</span>
     <span class="status-pill" id="lastUpdate">Last update: --</span>
     <span class="status-pill" id="marketPhase">Phase: --</span>
+    <span class="status-pill" id="regimePill">Regime: --</span>
     <select id="pairSelect" onchange="onPairChange()">
       <option value="XAUUSD">XAUUSD</option>
       <option value="EURUSD">EURUSD</option>
-      <option value="BTCUSD">BTCUSD</option>
     </select>
   </div>
 
-  <!-- Main Cards -->
   <div class="grid">
     <div class="card">
       <h3>💰 Spot Price</h3>
@@ -164,7 +163,6 @@
     </div>
   </div>
 
-  <!-- Strategy Signals & Insight -->
   <div class="grid">
     <div class="card">
       <h3>📡 Strategy Signals</h3>
@@ -176,7 +174,6 @@
     </div>
   </div>
 
-  <!-- Agent Activity -->
   <div class="grid">
     <div class="card">
       <h3>🧩 Agent Activity</h3>
@@ -184,47 +181,40 @@
     </div>
   </div>
 
-  <!-- Today's Trades -->
   <div class="card" style="margin-bottom:30px;">
     <h3>📈 Today's Trades</h3>
     <div id="tradesTable" style="overflow-x:auto;">--</div>
   </div>
 
-  <!-- Trade Reviews -->
   <div class="card" style="margin-bottom:30px;">
     <h3>🔍 Trade Reviews (A.A.G.A Gemini)</h3>
     <div id="tradeReviews">--</div>
   </div>
 
-  <!-- Daily Strategy Performance -->
   <div class="card" style="margin-bottom:30px;">
     <h3>📊 Today's Strategy Performance</h3>
     <div id="dailyStrategyStats">--</div>
     <button onclick="loadDailyStrategyStats()">Refresh Daily Stats</button>
   </div>
 
-  <!-- Weekly Backtest -->
   <div class="card" style="margin-bottom:30px;">
     <h3>📊 Weekly Backtest (Last 7 Days)</h3>
     <div id="weeklyBacktest">--</div>
     <button onclick="loadWeeklyBacktest()">Refresh Weekly Backtest</button>
   </div>
 
-  <!-- Market Condition Performance -->
   <div class="card" style="margin-bottom:30px;">
     <h3>📈 Market Condition Performance (Today)</h3>
     <div id="marketConditionStats">--</div>
     <button onclick="loadMarketConditionStats()">Refresh Market Stats</button>
   </div>
 
-  <!-- AI Insights -->
   <div class="card" style="margin-bottom:30px;">
     <h3>🧠 AI Insights (Gemini)</h3>
     <div id="aiInsights">--</div>
     <button onclick="loadAiInsights()">Refresh Insights</button>
   </div>
 
-  <!-- NEW: Economic Calendar & Explainable AI -->
   <div class="grid" style="margin-bottom:30px;">
     <div class="card">
       <h3>📅 Economic Calendar (24h)</h3>
@@ -244,7 +234,6 @@
 
   function onPairChange() {
     currentPair = document.getElementById('pairSelect').value;
-    // Reload all data for the new pair
     fetchAll();
     loadDailyStrategyStats();
     loadWeeklyBacktest();
@@ -261,6 +250,7 @@
       document.getElementById('currentPrice').innerText = d.current_price ? '$' + d.current_price.toFixed(2) : '$----.--';
       document.getElementById('marketTrend').innerText = d.market_trend || 'Unknown';
       document.getElementById('marketPhase').innerText = 'Phase: ' + (d.market_trend || '--');
+      document.getElementById('regimePill').innerText = 'Regime: ' + (d.regime || '--');
       document.getElementById('sweepInfo').innerHTML = d.sweep_detected ? `${d.sweep_type} @ ${d.sweep_level?.toFixed(2)}` : 'No sweep';
       document.getElementById('mssInfo').innerText = d.mss || 'None';
       if (d.fvg) {
@@ -350,6 +340,7 @@
     }
   }
 
+  // ... keep all other load functions (same as before) ...
   async function loadDailyStrategyStats() {
     const container = document.getElementById('dailyStrategyStats');
     container.innerHTML = 'Loading...';
@@ -363,9 +354,7 @@
         </div>`;
       }
       container.innerHTML = html || 'No completed trades today';
-    } catch(e) {
-      container.innerHTML = '<span style="color:#ff4466;">Failed to load daily stats</span>';
-    }
+    } catch(e) { container.innerHTML = '<span style="color:#ff4466;">Failed to load daily stats</span>'; }
   }
 
   async function loadWeeklyBacktest() {
@@ -374,23 +363,16 @@
     try {
       const res = await fetch(`/weekly-backtest?pair=${currentPair}`);
       const data = await res.json();
-      if (data.error) {
-        container.innerHTML = `<span style="color:#ff4466;">${data.error}</span>`;
-        return;
-      }
+      if (data.error) { container.innerHTML = `<span style="color:#ff4466;">${data.error}</span>`; return; }
       let html = '';
       data.results.forEach(r => {
         html += `<div class="trade-review">
           <b>${r.strategy}</b>: Trades ${r.trades}, Win Rate ${r.win_rate}%, ROI ${r.roi}%, Balance $${r.final_balance}
         </div>`;
       });
-      if (data.best_strategy) {
-        html += `<p><b>🏆 Best: ${data.best_strategy}</b></p>`;
-      }
+      if (data.best_strategy) html += `<p><b>🏆 Best: ${data.best_strategy}</b></p>`;
       container.innerHTML = html || 'No data';
-    } catch(e) {
-      container.innerHTML = '<span style="color:#ff4466;">Failed to load weekly backtest</span>';
-    }
+    } catch(e) { container.innerHTML = '<span style="color:#ff4466;">Failed to load weekly backtest</span>'; }
   }
 
   async function loadMarketConditionStats() {
@@ -406,9 +388,7 @@
         </div>`;
       }
       container.innerHTML = html || 'No trades today';
-    } catch(e) {
-      container.innerHTML = '<span style="color:#ff4466;">Failed to load</span>';
-    }
+    } catch(e) { container.innerHTML = '<span style="color:#ff4466;">Failed to load</span>'; }
   }
 
   async function loadAiInsights() {
@@ -418,9 +398,7 @@
       const res = await fetch('/ai-insights');
       const data = await res.json();
       container.innerHTML = `<pre style="white-space:pre-wrap;">${JSON.stringify(data, null, 2)}</pre>`;
-    } catch(e) {
-      container.innerHTML = '<span style="color:#ff4466;">Failed to load insights</span>';
-    }
+    } catch(e) { container.innerHTML = '<span style="color:#ff4466;">Failed to load insights</span>'; }
   }
 
   async function loadEconomicCalendar() {
@@ -433,12 +411,8 @@
         let html = '';
         data.events.forEach(e => html += `<div class="trade-review">${e.event} at ${new Date(e.time).toUTCString()}</div>`);
         container.innerHTML = html;
-      } else {
-        container.innerHTML = 'No upcoming events in next 24h';
-      }
-    } catch(e) {
-      container.innerHTML = 'Error loading calendar';
-    }
+      } else container.innerHTML = 'No upcoming events in next 24h';
+    } catch(e) { container.innerHTML = 'Error loading calendar'; }
   }
 
   async function loadExplainableAI() {
@@ -448,12 +422,9 @@
       const res = await fetch(`/explain/${currentPair}`);
       const data = await res.json();
       container.innerHTML = `<pre style="white-space:pre-wrap; font-size:0.8rem;">${JSON.stringify(data, null, 2)}</pre>`;
-    } catch(e) {
-      container.innerHTML = 'Failed to load explanation';
-    }
+    } catch(e) { container.innerHTML = 'Failed to load explanation'; }
   }
 
-  // Initial load
   fetchAll();
   loadDailyStrategyStats();
   loadWeeklyBacktest();
@@ -462,7 +433,6 @@
   loadEconomicCalendar();
   loadExplainableAI();
 
-  // Refresh intervals
   setInterval(fetchAll, 30000);
   setInterval(loadDailyStrategyStats, 60000);
   setInterval(loadMarketConditionStats, 60000);
