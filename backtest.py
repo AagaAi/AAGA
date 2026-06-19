@@ -39,9 +39,18 @@ def backtest_strategy(strategy, candles):
         signal = strategy.get_signal(ohlc)
         current_price = closes[-1]
 
+        # --- Fix: handle None SL/TP ---
+        sl_val = signal.get('sl')
+        tp_val = signal.get('tp')
+        # If SL/TP is None, substitute safe values that will never trigger
+        if sl_val is None:
+            sl_val = 0 if position == 1 else 99999
+        if tp_val is None:
+            tp_val = 99999 if position == 1 else 0
+
         if position != 0:
             if position == 1:  # long
-                if current_price <= signal.get('sl', 0) or current_price >= signal.get('tp', 9999):
+                if current_price <= sl_val or current_price >= tp_val:
                     pnl = (current_price - entry_price) * 100
                     balance += pnl
                     total_pnl += pnl
@@ -49,7 +58,7 @@ def backtest_strategy(strategy, candles):
                     else: losses += 1
                     position = 0
             else:  # short
-                if current_price >= signal.get('sl', 9999) or current_price <= signal.get('tp', 0):
+                if current_price >= sl_val or current_price <= tp_val:
                     pnl = (entry_price - current_price) * 100
                     balance += pnl
                     total_pnl += pnl
@@ -58,10 +67,11 @@ def backtest_strategy(strategy, candles):
                     position = 0
 
         if position == 0 and signal['signal'] in ('BUY','SELL'):
-            if signal['entry_zone'] and signal['sl'] and signal['tp']:
+            if signal['entry_zone'] and sl_val is not None and tp_val is not None:
                 position = 1 if signal['signal'] == 'BUY' else -1
                 entry_price = current_price
 
+    # Close any open position at the end
     if position != 0:
         final_price = closes[-1]
         if position == 1: pnl = (final_price - entry_price) * 100
@@ -85,13 +95,11 @@ def backtest_strategy(strategy, candles):
     }
 
 async def run_comparison():
-    try:
-        candles = await fetch_last_month_candles()
-        if not candles or len(candles) < 200:
-            return {"error": "Not enough historical data (less than 200 candles)"}
-    except Exception as e:
-        return {"error": f"Data fetch failed: {str(e)}"}
+    candles = await fetch_last_month_candles()
+    if not candles or len(candles) < 200:
+        return {"error": "Not enough historical data (less than 200 candles)"}
 
+    # Initialize strategies (same as in main.py)
     ema_dmi = EmaDmiStrategy()
     rf_strat = RandomForestStrategy()
     # Quick train RF with dummy data so it doesn't just HOLD
