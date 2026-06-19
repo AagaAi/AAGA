@@ -7,9 +7,9 @@ class GeminiAnalyst:
     def __init__(self, api_key: str = ""):
         self.available = False
         self.last_call = 0
-        self.call_interval = 120   # 2 minutes between calls (quota saver)
+        self.call_interval = 10        # seconds (not used now, but keep for internal throttling)
         self.consecutive_errors = 0
-        self.max_errors = 3         # after 3 errors, disable for 1 hour
+        self.max_errors = 2
         self.disabled_until = 0
         key = api_key or os.environ.get("GEMINI_API_KEY", "")
         if not key:
@@ -17,17 +17,15 @@ class GeminiAnalyst:
             return
         try:
             self.client = genai.Client(api_key=key)
-            self.model = "gemini-2.0-flash"
+            # Use 1.5 Flash (free tier available, high quota)
+            self.model = "gemini-1.5-flash"
             self.available = True
         except Exception as e:
             self.error = str(e)
 
     def _should_throttle(self) -> bool:
-        """Check if we should skip the call."""
         now = _time.time()
         if self.disabled_until > now:
-            return True
-        if now - self.last_call < self.call_interval:
             return True
         return False
 
@@ -35,9 +33,8 @@ class GeminiAnalyst:
         if not self.available:
             return None
         if self._should_throttle():
-            print("⏳ Gemini throttled (quota saver)")
+            print("⏳ Gemini disabled due to earlier quota error")
             return None
-        self.last_call = _time.time()
         try:
             response = self.client.models.generate_content(
                 model=self.model,
@@ -49,11 +46,13 @@ class GeminiAnalyst:
             self.consecutive_errors += 1
             print(f"Gemini API error: {e}")
             if self.consecutive_errors >= self.max_errors:
-                self.disabled_until = _time.time() + 3600  # disable for 1 hour
+                # Disable for 1 hour
+                self.disabled_until = _time.time() + 3600
                 print("⚠️ Gemini disabled for 1 hour due to repeated errors")
             return None
 
     def analyze_daily_trades(self, trades: list) -> dict:
+        # (not used in hourly, but kept for compatibility)
         if not self.available or not trades:
             return {"summary": "Gemini unavailable or no trades", "recommendations": []}
         prompt = f"""
@@ -67,7 +66,7 @@ Return ONLY a JSON object with keys: "summary", "patterns", "parameter_suggestio
 """
         text = self._safe_generate(prompt)
         if not text:
-            return {"summary": "Gemini call failed (quota exhausted)", "recommendations": []}
+            return {"summary": "Gemini call failed", "recommendations": []}
         try:
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0]
