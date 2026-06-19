@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Complete, Stable, with 3‑Hour Gemini Intelligence)
+# main.py – A.A.G.A AI (Stable, Hourly Intelligence every 3h, Gemini Fixed)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -198,7 +198,7 @@ async def update_pending_trades():
                 trade_memory.add_experience({"features": features, "action": action_map.get(sig, 2), "reward": pnl / 100})
 
 # ============================================================
-# Hourly Gemini Intelligence (now every 3 hours – 10800 sec)
+# Hourly Gemini Intelligence (every 3 hours)
 # ============================================================
 def _json_safe_params(strat):
     """Return a dict of only JSON‑serializable attributes of a strategy."""
