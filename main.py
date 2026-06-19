@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Stable, Hourly Intelligence every 3h, Gemini Fixed)
+# main.py – A.A.G.A AI (Stable, Hourly Intelligence every 3h, Gemini 2.0 Flash Fixed)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
