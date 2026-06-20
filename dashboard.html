@@ -227,6 +227,13 @@
       <button onclick="loadExplainableAI()">Explain Decision</button>
     </div>
   </div>
+
+  <!-- Debug Card -->
+  <div class="card" style="margin-bottom:30px;">
+    <h3>🔧 System Debug</h3>
+    <div id="debugInfo">--</div>
+    <button onclick="loadDebugInfo()">Refresh Debug</button>
+  </div>
 </div>
 
 <script>
@@ -243,9 +250,7 @@
     loadExplainableAI();
   }
 
-  // ------------------------------------------------------------
-  //  fetchAll() – the only place where connectionStatus is updated
-  // ------------------------------------------------------------
+  // ---------- fetchAll (only sets OFFLINE here) ----------
   async function fetchAll() {
     try {
       const signalRes = await fetch(`/master-signal?pair=${currentPair}`);
@@ -344,15 +349,12 @@
       document.getElementById('tradeReviews').innerHTML = reviewHtml || 'No reviews yet';
       document.getElementById('lastUpdate').innerText = 'Last update: ' + new Date().toLocaleTimeString();
     } catch (e) {
-      // Only here we set OFFLINE because master-signal is critical
       document.getElementById('connectionStatus').innerHTML = '● OFFLINE';
       console.error(e);
     }
   }
 
-  // ------------------------------------------------------------
-  //  Helper loaders – they never touch connectionStatus
-  // ------------------------------------------------------------
+  // ---------- Helper loaders (never change connectionStatus) ----------
   async function loadDailyStrategyStats() {
     const container = document.getElementById('dailyStrategyStats');
     container.innerHTML = 'Loading...';
@@ -437,6 +439,19 @@
     } catch(e) { container.innerHTML = 'Failed to load explanation'; }
   }
 
+  // ---------- Debug info loader ----------
+  async function loadDebugInfo() {
+    const container = document.getElementById('debugInfo');
+    container.innerHTML = 'Loading...';
+    try {
+      const res = await fetch('/debug');
+      const data = await res.json();
+      container.innerHTML = `<pre style="white-space:pre-wrap; font-size:0.8rem;">${JSON.stringify(data, null, 2)}</pre>`;
+    } catch(e) {
+      container.innerHTML = 'Failed to load debug info';
+    }
+  }
+
   // initial load
   fetchAll();
   loadDailyStrategyStats();
@@ -445,6 +460,7 @@
   loadAiInsights();
   loadEconomicCalendar();
   loadExplainableAI();
+  loadDebugInfo();
 
   // refresh intervals
   setInterval(fetchAll, 30000);
@@ -453,6 +469,7 @@
   setInterval(loadWeeklyBacktest, 300000);
   setInterval(loadAiInsights, 300000);
   setInterval(loadEconomicCalendar, 600000);
+  setInterval(loadDebugInfo, 60000);
 </script>
 </body>
 </html>
