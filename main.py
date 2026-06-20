@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Phase 10: Lightweight GAN + All Previous Features)
+# main.py – A.A.G.A AI (Complete with All Routes, GAN, Genetic Optimizer, etc.)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,11 +11,10 @@ import yfinance as yf
 from agents.gemini_agent import GeminiAnalyst
 from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
-# Optional PPO agent – if file missing, dummy
 try:
     from agents.ppo_agent import PPOAgent
 except:
-    class PPOAgent:  # dummy fallback
+    class PPOAgent:
         name = "PPO"
         def get_signal(self, ohlc):
             return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Unknown","current_price":0}
@@ -30,7 +29,7 @@ from agents.economic_calendar import is_high_impact_now, get_upcoming_events
 from agents.telegram_notifier import TelegramNotifier
 from agents.regime_detector import RegimeDetector
 from agents.genetic_optimizer import GeneticOptimizer
-from agents.gan_augmentor import LightweightGAN   # <-- NEW
+from agents.gan_augmentor import LightweightGAN
 from backtest import run_comparison as compare_strategies
 
 # ---------- Config ----------
@@ -60,7 +59,7 @@ except: pass
 market_classifier = MarketClassifier()
 regime_detector = RegimeDetector()
 genetic_optimizer = GeneticOptimizer()
-gan_model = LightweightGAN()   # <-- NEW
+gan_model = LightweightGAN()
 
 # ---------- Risk Manager ----------
 class RiskManager:
@@ -193,7 +192,6 @@ async def sdk_get_price_async(pair):
         await connection.close()
         if price: return (float(price.get("bid", 0)) + float(price.get("ask", 0))) / 2
     except: pass
-    # fallback
     try:
         ticker = yf.Ticker(YAHOO_SYMBOLS.get(pair, pair+"=X"))
         df = ticker.history(period="1d", interval="1m")
@@ -388,19 +386,17 @@ async def weekly_scheduler():
                 with open(CONFIG_PATH,"w") as f: json.dump(cfg, f, indent=2)
                 print("✅ Genetic optimizer applied")
         except Exception as e: print(f"Genetic error: {e}")
-        # GAN training (lightweight)
+        # GAN training
         try:
             print("🎨 Training GAN on historical candles...")
             candles = await sdk_get_candles_async("XAUUSD", "1m", 2000)
             if candles and len(candles)>500:
                 data = np.array([[c['open'], c['high'], c['low'], c['close']] for c in candles])
-                # Normalize
                 mn = data.min(axis=0); mx = data.max(axis=0)
                 norm = (data - mn) / (mx - mn + 1e-8)
                 gan_model.train(norm, epochs=500, batch_size=64)
-                # Generate 500 synthetic candles and save
                 synthetic = gan_model.generate_samples(500)
-                synthetic = synthetic * (mx - mn) + mn   # denormalize
+                synthetic = synthetic * (mx - mn) + mn
                 with open("synthetic_candles.json", "w") as f:
                     json.dump(synthetic.tolist(), f)
                 print("✅ GAN training complete, synthetic candles saved.")
@@ -423,7 +419,7 @@ def init_db():
     con.commit(); con.close()
 init_db()
 
-# ---------- Dashboard Routes ----------
+# ---------- All Dashboard Routes ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(): return FileResponse("dashboard.html")
 
@@ -469,9 +465,81 @@ async def master_signal(pair: str = Query("XAUUSD")):
     cached = latest_signals_cache[pair]
     return {**cached, "gemini_advice": latest_intelligence, "news_sentiment": news_agent.analyze()}
 
-# (Other routes remain same as previous full main.py – /agent-log, /today-trades, /trade-reviews, /strategy-performance, etc.)
-# For brevity, they are omitted here but must be copied from the previous full main.py.
-# I'll provide the rest in a separate snippet to avoid token limit, but the user can use the previous main.py routes.
+@app.get("/agent-log")
+def agent_log():
+    rows = db_execute("SELECT hour, agent, action, prob, details FROM agent_log WHERE hour >= datetime('now', '-1 day') ORDER BY id DESC LIMIT 20", fetch=True)
+    return [{"hour":r[0],"agent":r[1],"action":r[2],"prob":r[3],"details":r[4]} for r in rows] if rows else []
+
+@app.get("/today-trades")
+def today_trades(pair: str = Query("XAUUSD")):
+    rows = db_execute("SELECT timestamp, pair, signal, entry, sl, tp, outcome, pnl, strategy_used, market_condition FROM trade_journal WHERE date(timestamp) = date('now') AND pair=? ORDER BY timestamp DESC", (pair,), fetch=True)
+    return [{"timestamp":r[0],"pair":r[1],"signal":r[2],"entry":r[3],"sl":r[4],"tp":r[5],"outcome":r[6],"pnl":r[7],"strategy":r[8],"market_condition":r[9]} for r in rows] if rows else []
+
+@app.get("/trade-reviews")
+def trade_reviews(pair: str = Query("XAUUSD")):
+    rows = db_execute("SELECT id, timestamp, signal, entry, sl, tp, outcome, pnl, gemini_insight, strategy_used, market_condition FROM trade_journal WHERE outcome IS NOT NULL AND pair=? ORDER BY timestamp DESC LIMIT 50", (pair,), fetch=True)
+    return [{"id": r[0], "timestamp": r[1], "signal": r[2], "entry": r[3], "sl": r[4], "tp": r[5],
+             "outcome": r[6], "pnl": r[7], "gemini_insight": r[8], "strategy": r[9], "market_condition": r[10]} for r in rows] if rows else []
+
+@app.get("/strategy-performance")
+def strategy_performance(pair: str = Query("XAUUSD")):
+    rows = db_execute("""SELECT strategy_used, COUNT(*) as total, SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins, SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as losses, SUM(pnl) as total_pnl FROM trade_journal WHERE date(timestamp) = date('now') AND pair=? AND outcome IS NOT NULL GROUP BY strategy_used""", (pair,), fetch=True)
+    result = {}
+    if rows:
+        for r in rows:
+            name = r[0] or "unknown"; total = r[1]; wins = r[2] or 0; losses = r[3] or 0
+            win_rate = wins / total * 100 if total > 0 else 0
+            result[name] = {"total_trades": total, "wins": wins, "losses": losses, "win_rate": round(win_rate,1), "pnl": round(r[4] or 0,2)}
+    return result
+
+@app.get("/market-condition-performance")
+def market_condition_performance(pair: str = Query("XAUUSD")):
+    rows = db_execute("""SELECT market_condition, COUNT(*) as total, SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins, SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as losses, SUM(pnl) as total_pnl FROM trade_journal WHERE date(timestamp) = date('now') AND pair=? AND outcome IS NOT NULL AND market_condition IS NOT NULL GROUP BY market_condition""", (pair,), fetch=True)
+    result = {}
+    if rows:
+        for r in rows:
+            cond = r[0] or "Unknown"; total = r[1]; wins = r[2] or 0; losses = r[3] or 0
+            win_rate = wins / total * 100 if total > 0 else 0
+            result[cond] = {"total_trades": total, "wins": wins, "losses": losses, "win_rate": round(win_rate,1), "pnl": round(r[4] or 0,2)}
+    return result
+
+@app.get("/weekly-backtest")
+async def weekly_backtest(pair: str = Query("XAUUSD")):
+    try: return await compare_strategies()
+    except Exception as e: return {"error": f"Backtest failed: {str(e)}"}
+
+@app.get("/economic-calendar")
+async def economic_calendar():
+    return {"events": get_upcoming_events()}
+
+@app.get("/explain/{pair}")
+async def explain_decision(pair: str):
+    if pair not in master_agents: return {"error":"Invalid pair"}
+    ohlc, strategy_signals = await run_all_strategies(pair)
+    if ohlc is None: return {"error":"No data"}
+    strategy_signals_list = [{"name": s[0].name, "signal": s[1].get("signal"), "entry_zone": s[1].get("entry_zone"),
+                              "sl": s[1].get("sl"), "tp": s[1].get("tp"), "trend": s[1].get("trend")} for s in strategy_signals]
+    signal_dicts = [{"strategy": s["name"], "signal": s["signal"], "entry_zone": s["entry_zone"], "sl": s["sl"], "tp": s["tp"]} for s in strategy_signals_list]
+    candles_15m = await sdk_get_candles_async(pair, "15m", 100)
+    regime = regime_detector.classify(candles_15m) if candles_15m else "UNKNOWN"
+    master_decision = master_agents[pair].decide(signal_dicts, regime=regime)
+    rf_importance = None
+    for strat in active_strategies[pair]:
+        if strat.name == "RandomForest" and strat.trained:
+            try: rf_importance = list(strat.model.feature_importances_)
+            except: pass
+    gemini_reasoning = latest_intelligence.get("summary", "Not available") if latest_intelligence else "Not available"
+    return {"pair":pair, "regime":regime, "signals":strategy_signals_list, "master_decision":master_decision,
+            "voting_weights":master_agents[pair].performance_memory, "random_forest_importance":rf_importance, "gemini_reasoning":gemini_reasoning}
+
+@app.get("/ai-insights")
+async def ai_insights(): return latest_intelligence
+
+@app.get("/news-sentiment")
+async def news_sentiment(): return news_agent.analyze()
+
+@app.get("/compare-strategies")
+async def compare_strategies_endpoint(): return await compare_strategies()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT",8000)))
