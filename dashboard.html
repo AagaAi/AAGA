@@ -228,14 +228,12 @@
     </div>
   </div>
 
-  <!-- NLP Sentiment Card -->
   <div class="card" style="margin-bottom:30px;">
     <h3>📰 News Sentiment (NLP)</h3>
     <div id="nlpSentiment">--</div>
     <button onclick="loadNLPSentiment()">Refresh Sentiment</button>
   </div>
 
-  <!-- Debug Card -->
   <div class="card" style="margin-bottom:30px;">
     <h3>🔧 System Debug</h3>
     <div id="debugInfo">--</div>
@@ -255,10 +253,10 @@
     loadAiInsights();
     loadEconomicCalendar();
     loadExplainableAI();
-    loadNLPSentiment();   // refresh sentiment as well
+    loadNLPSentiment();
   }
 
-  // ---------- fetchAll (only sets OFFLINE here) ----------
+  // ---------- fetchAll ----------
   async function fetchAll() {
     try {
       const signalRes = await fetch(`/master-signal?pair=${currentPair}`);
@@ -266,7 +264,7 @@
       const d = await signalRes.json();
       document.getElementById('connectionStatus').innerHTML = '● ONLINE';
 
-      document.getElementById('currentPrice').innerText = d.current_price ? '$' + d.current_price.toFixed(2) : '$----.--';
+      document.getElementById('currentPrice').innerText = d.current_price ? '$' + d.current_price.toFixed(currentPair==='EURUSD'?5:2) : '$----.--';
       document.getElementById('marketTrend').innerText = d.market_trend || 'Unknown';
       document.getElementById('marketPhase').innerText = 'Phase: ' + (d.market_trend || '--');
       document.getElementById('regimePill').innerText = 'Regime: ' + (d.regime || '--');
@@ -362,7 +360,7 @@
     }
   }
 
-  // ---------- Helper loaders (never change connectionStatus) ----------
+  // ---------- Helpers ----------
   async function loadDailyStrategyStats() {
     const container = document.getElementById('dailyStrategyStats');
     container.innerHTML = 'Loading...';
@@ -447,7 +445,6 @@
     } catch(e) { container.innerHTML = 'Failed to load explanation'; }
   }
 
-  // ---------- NLP Sentiment Loader ----------
   async function loadNLPSentiment() {
     const container = document.getElementById('nlpSentiment');
     container.innerHTML = 'Loading...';
@@ -457,24 +454,13 @@
       let html = `<p><b>${data.summary || ''}</b></p>`;
       if (data.headlines && data.headlines.length > 0) {
         data.headlines.forEach(h => {
-          let cls = '';
-          if (h.sentiment === 'positive') cls = 'signal-buy';
-          else if (h.sentiment === 'negative') cls = 'signal-sell';
-          html += `<div class="trade-review">
-            <span class="${cls}">${h.sentiment || 'news'}</span> ${h.title}
-            ${h.confidence ? ` (${Math.round(h.confidence*100)}%)` : ''}
-          </div>`;
+          html += `<div class="trade-review">${h.title || h}</div>`;
         });
-      } else {
-        html += '<p>No headlines</p>';
       }
-      container.innerHTML = html;
-    } catch(e) {
-      container.innerHTML = '<span style="color:#ff4466;">Failed to load sentiment</span>';
-    }
+      container.innerHTML = html || 'No headlines';
+    } catch(e) { container.innerHTML = '<span style="color:#ff4466;">Failed to load sentiment</span>'; }
   }
 
-  // ---------- Debug info loader ----------
   async function loadDebugInfo() {
     const container = document.getElementById('debugInfo');
     container.innerHTML = 'Loading...';
@@ -482,9 +468,7 @@
       const res = await fetch('/debug');
       const data = await res.json();
       container.innerHTML = `<pre style="white-space:pre-wrap; font-size:0.8rem;">${JSON.stringify(data, null, 2)}</pre>`;
-    } catch(e) {
-      container.innerHTML = 'Failed to load debug info';
-    }
+    } catch(e) { container.innerHTML = 'Failed to load debug info'; }
   }
 
   // initial load
@@ -505,7 +489,7 @@
   setInterval(loadWeeklyBacktest, 300000);
   setInterval(loadAiInsights, 300000);
   setInterval(loadEconomicCalendar, 600000);
-  setInterval(loadNLPSentiment, 120000);  // every 2 min
+  setInterval(loadNLPSentiment, 120000);
   setInterval(loadDebugInfo, 60000);
 </script>
 </body>
