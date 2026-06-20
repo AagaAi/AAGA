@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Agent Log 24h + Explain Fix)
+# main.py – A.A.G.A AI (Dashboard Fix + Debug Endpoint)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,7 +11,14 @@ import yfinance as yf
 from agents.gemini_agent import GeminiAnalyst
 from agents.strategy_agent import EmaDmiStrategy
 from agents.ai_agent import RandomForestStrategy
-from agents.ppo_agent import PPOAgent
+# Optional PPO agent – if file missing, dummy
+try:
+    from agents.ppo_agent import PPOAgent
+except:
+    class PPOAgent:  # dummy fallback
+        name = "PPO"
+        def get_signal(self, ohlc):
+            return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Unknown","current_price":0}
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
 from agents.news_agent import NewsSentimentAgent
@@ -96,7 +103,21 @@ def run_news_analysis():
 
 # Fallback
 USE_FALLBACK = False
-latest_signals_cache = {}
+
+# Default signal cache for every pair – so dashboard never sees "undefined"
+latest_signals_cache = {
+    pair: {
+        "decision": "HOLD",
+        "probabilities": {"BUY": 0.33, "SELL": 0.33, "HOLD": 0.34},
+        "risk_brief": None,
+        "strategy_used": "Waiting for data",
+        "market_trend": "Unknown",
+        "current_price": 0,
+        "strategy_signals": [],
+        "regime": "UNKNOWN"
+    } for pair in pairs
+}
+
 trade_memory = TradeMemory(DB_PATH)
 strategy_factory = StrategyFactory(gemini_analyst) if gemini_analyst.available else None
 latest_intelligence = {"summary": "Waiting for first 15‑min analysis...", "timestamp": None}
@@ -250,7 +271,7 @@ async def run_all_strategies(pair):
 MIN_STOP_DISTANCE = 1.10
 
 # ---------- 15‑Min Gemini Intelligence ----------
-GEMINI_INTERVAL_SEC = 900   # 15 minutes
+GEMINI_INTERVAL_SEC = 900
 
 async def gemini_intelligence_cycle():
     global latest_intelligence
@@ -339,6 +360,7 @@ async def autonomous_trading_loop():
                 if decision_signal in ("BUY","SELL") and final_decision.get("entry_zone"):
                     entry = final_decision["entry_zone"][0] if decision_signal=="BUY" else final_decision["entry_zone"][1]
                     risk_brief = {"entry": round(entry,2), "sl": final_decision["sl"], "tp": final_decision["tp"]}
+                # Update cache with real data
                 latest_signals_cache[pair] = {
                     "decision": decision_signal,
                     "probabilities": probs,
@@ -350,7 +372,7 @@ async def autonomous_trading_loop():
                     "regime": regime
                 }
 
-                # Log agent activity for each strategy signal (✅ FIX)
+                # Log agent activity
                 now = datetime.datetime.utcnow()
                 hour = now.strftime("%Y-%m-%d %H:00")
                 for s in strategy_signals_list:
@@ -476,50 +498,75 @@ def dashboard():
 async def health():
     return {"status": "ok", "autonomous_loop": "active", "metaapi_healthy": _metaapi_healthy}
 
+@app.get("/debug")
+async def debug():
+    """Returns live status of all pairs and agents."""
+    status = {}
+    for pair in pairs:
+        status[pair] = {
+            "signal": latest_signals_cache[pair]["decision"],
+            "price": latest_signals_cache[pair]["current_price"],
+            "regime": latest_signals_cache[pair]["regime"],
+            "strategies": [s.name for s in active_strategies[pair]],
+            "risk_balance": risk_managers[pair].balance,
+            "trades_today": db_execute("SELECT COUNT(*) FROM trade_journal WHERE pair=? AND date(timestamp)=date('now')", (pair,), fetch=True)[0][0] if db_execute("SELECT COUNT(*) FROM trade_journal WHERE pair=? AND date(timestamp)=date('now')", (pair,), fetch=True) else 0
+        }
+    return {
+        "metaapi_healthy": _metaapi_healthy,
+        "gemini_available": gemini_analyst.available,
+        "pairs": status,
+        "last_intelligence": latest_intelligence.get("summary")
+    }
+
 @app.get("/master-signal")
 async def master_signal(pair: str = Query("XAUUSD")):
     if pair not in master_agents:
         return {"error": "Invalid pair"}
-    ohlc, strategy_signals = await run_all_strategies(pair)
-    if ohlc is None:
-        cached = latest_signals_cache.get(pair, {})
-        return {**cached, "gemini_advice": latest_intelligence}
-    strategy_signals_list = [{"name": strat.name, "signal": sig.get("signal"),
-                              "entry_zone": sig.get("entry_zone"), "sl": sig.get("sl"),
-                              "tp": sig.get("tp"), "trend": sig.get("trend"),
-                              "current_price": sig.get("current_price")}
-                             for strat, sig in strategy_signals]
-    signal_dicts = [{"strategy": s["name"], "signal": s["signal"],
-                     "entry_zone": s["entry_zone"], "sl": s["sl"],
-                     "tp": s["tp"], "current_price": s["current_price"]}
-                    for s in strategy_signals_list]
-    candles_15m = await sdk_get_candles_async(pair, "15m", 100)
-    regime = regime_detector.classify(candles_15m) if candles_15m else "UNKNOWN"
-    master_decision = master_agents[pair].decide(signal_dicts, regime=regime)
-    conf = master_decision.get("confidence", 0.5)
-    decision_signal = master_decision["signal"]
-    probs = {"BUY": conf if decision_signal=="BUY" else 0,
-             "SELL": conf if decision_signal=="SELL" else 0,
-             "HOLD": 1-conf if decision_signal in ("BUY","SELL") else 1.0}
-    risk_brief = None
-    if decision_signal in ("BUY","SELL") and master_decision.get("entry_zone"):
-        entry = master_decision["entry_zone"][0] if decision_signal=="BUY" else master_decision["entry_zone"][1]
-        risk_brief = {"entry": round(entry,2), "sl": master_decision["sl"], "tp": master_decision["tp"]}
-    return {
-        "decision": decision_signal,
-        "probabilities": probs,
-        "risk_brief": risk_brief,
-        "strategy_used": master_decision.get("strategy_used", "Master"),
-        "market_trend": strategy_signals_list[0].get("trend") if strategy_signals_list else "Unknown",
-        "current_price": strategy_signals_list[0].get("current_price", 0) if strategy_signals_list else 0,
-        "strategy_signals": strategy_signals_list,
-        "gemini_advice": latest_intelligence,
-        "regime": regime
-    }
+    # Try to fetch fresh data; if fails, return cached data (which always exists)
+    try:
+        ohlc, strategy_signals = await run_all_strategies(pair)
+        if ohlc is not None and strategy_signals is not None:
+            # We have fresh data – compute and update cache
+            strategy_signals_list = [{"name": strat.name, "signal": sig.get("signal"),
+                                      "entry_zone": sig.get("entry_zone"), "sl": sig.get("sl"),
+                                      "tp": sig.get("tp"), "trend": sig.get("trend"),
+                                      "current_price": sig.get("current_price")}
+                                     for strat, sig in strategy_signals]
+            signal_dicts = [{"strategy": s["name"], "signal": s["signal"],
+                             "entry_zone": s["entry_zone"], "sl": s["sl"],
+                             "tp": s["tp"], "current_price": s["current_price"]}
+                            for s in strategy_signals_list]
+            candles_15m = await sdk_get_candles_async(pair, "15m", 100)
+            regime = regime_detector.classify(candles_15m) if candles_15m else "UNKNOWN"
+            master_decision = master_agents[pair].decide(signal_dicts, regime=regime)
+            conf = master_decision.get("confidence", 0.5)
+            decision_signal = master_decision["signal"]
+            probs = {"BUY": conf if decision_signal=="BUY" else 0,
+                     "SELL": conf if decision_signal=="SELL" else 0,
+                     "HOLD": 1-conf if decision_signal in ("BUY","SELL") else 1.0}
+            risk_brief = None
+            if decision_signal in ("BUY","SELL") and master_decision.get("entry_zone"):
+                entry = master_decision["entry_zone"][0] if decision_signal=="BUY" else master_decision["entry_zone"][1]
+                risk_brief = {"entry": round(entry,2), "sl": master_decision["sl"], "tp": master_decision["tp"]}
+            latest_signals_cache[pair] = {
+                "decision": decision_signal,
+                "probabilities": probs,
+                "risk_brief": risk_brief,
+                "strategy_used": master_decision.get("strategy_used", "Master"),
+                "market_trend": strategy_signals_list[0].get("trend") if strategy_signals_list else "Unknown",
+                "current_price": strategy_signals_list[0].get("current_price", 0) if strategy_signals_list else 0,
+                "strategy_signals": strategy_signals_list,
+                "regime": regime
+            }
+    except Exception as e:
+        print(f"Master signal error: {e}")
+
+    # Return cache (always populated)
+    cached = latest_signals_cache[pair]
+    return {**cached, "gemini_advice": latest_intelligence}
 
 @app.get("/agent-log")
 def agent_log():
-    # ✅ FIX: Query last 24 hours instead of 1 hour
     rows = db_execute("SELECT hour, agent, action, prob, details FROM agent_log WHERE hour >= datetime('now', '-1 day') ORDER BY id DESC LIMIT 20", fetch=True)
     return [{"hour":r[0],"agent":r[1],"action":r[2],"prob":r[3],"details":r[4]} for r in rows] if rows else []
 
@@ -604,7 +651,6 @@ async def explain_decision(pair: str):
         if strat.name == "RandomForest" and strat.trained:
             try: rf_importance = list(strat.model.feature_importances_)
             except: pass
-    # ✅ FIX: safe get for gemini_reasoning
     gemini_reasoning = latest_intelligence.get("summary", "Not available") if latest_intelligence else "Not available"
     return {
         "pair": pair,
