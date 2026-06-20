@@ -14,3 +14,5 @@ stable-baselines3
 gymnasium
 telegram
 yfinance
+transformers
+torch
