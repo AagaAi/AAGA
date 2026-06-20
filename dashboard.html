@@ -111,16 +111,13 @@
     .profit { color: #00ff88; }
     .loss { color: #ff4466; }
     .trade-review { background: rgba(0, 255, 255, 0.05); border-left: 3px solid #00ffff; padding: 10px; margin: 10px 0; border-radius: 8px; }
-    .explain-section { margin-top: 10px; }
-    .explain-section h4 { color: #d4af37; margin: 5px 0; }
-    .explain-section ul { list-style: none; padding-left: 15px; }
-    .explain-section li { padding: 3px 0; }
     button {
       background: transparent; border: 1px solid #00ffff; color: #00ffff;
       padding: 10px 20px; border-radius: 25px; font-family: 'Orbitron', sans-serif;
       cursor: pointer; transition: all 0.3s; margin: 5px;
     }
     button:hover { background: #00ffff22; box-shadow: 0 0 20px #00ffff66; }
+    .error-msg { color: #ff4466; }
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: #0a0c0f; }
     ::-webkit-scrollbar-thumb { background: #00ffff44; border-radius: 10px; }
@@ -132,7 +129,7 @@
   <h1>⚡ A.A.G.A AI</h1>
 
   <div class="status-bar">
-    <span class="status-pill" id="connectionStatus">● ONLINE</span>
+    <span class="status-pill" id="connectionStatus">● CHECKING</span>
     <span class="status-pill" id="lastUpdate">Last update: --</span>
     <span class="status-pill" id="marketPhase">Phase: --</span>
     <span class="status-pill" id="regimePill">Regime: --</span>
@@ -260,10 +257,11 @@
     loadNLPSentiment();
   }
 
+  // ---------- fetchAll – only sets OFFLINE if truly unreachable ----------
   async function fetchAll() {
     try {
       const signalRes = await fetch(`/master-signal?pair=${currentPair}`);
-      if (!signalRes.ok) throw new Error("Master signal endpoint returned " + signalRes.status);
+      if (!signalRes.ok) throw new Error("Status " + signalRes.status);
       const d = await signalRes.json();
       document.getElementById('connectionStatus').innerHTML = '● ONLINE';
 
@@ -308,51 +306,61 @@
       }
       document.getElementById('strategySignalsContainer').innerHTML = strategyHtml;
 
+      // Agent logs
       const logRes = await fetch('/agent-log');
-      const logs = await logRes.json();
-      let logHtml = '';
-      logs.forEach(l => {
-        logHtml += `<div class="agent-item">
-          <span class="agent-name">${l.agent}</span>
-          <span>${l.action} (${Math.round(l.prob*100)}%)</span>
-          <span style="color:#6b7b8b;">${l.hour}</span>
-        </div>`;
-      });
-      document.getElementById('agentLogContainer').innerHTML = logHtml || 'No agent activity';
+      if (logRes.ok) {
+        const logs = await logRes.json();
+        let logHtml = '';
+        logs.forEach(l => {
+          logHtml += `<div class="agent-item">
+            <span class="agent-name">${l.agent}</span>
+            <span>${l.action} (${Math.round(l.prob*100)}%)</span>
+            <span style="color:#6b7b8b;">${l.hour}</span>
+          </div>`;
+        });
+        document.getElementById('agentLogContainer').innerHTML = logHtml || 'No agent activity';
+      } else { document.getElementById('agentLogContainer').innerHTML = 'Unable to load'; }
 
+      // Today's trades
       const tradesRes = await fetch(`/today-trades?pair=${currentPair}`);
-      const trades = await tradesRes.json();
-      let tradesHtml = '<table><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Strategy</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th><th>Market</th></tr>';
-      trades.forEach(t => {
-        let cls = (t.pnl > 0) ? 'profit' : (t.pnl < 0) ? 'loss' : '';
-        tradesHtml += `<tr>
-          <td>${t.timestamp ? t.timestamp.substr(11,8) : ''}</td>
-          <td>${t.pair || currentPair}</td>
-          <td>${t.signal}</td>
-          <td>${t.strategy || ''}</td>
-          <td>${t.entry ? '$'+t.entry : ''}</td>
-          <td>${t.sl ? '$'+t.sl : ''}</td>
-          <td>${t.tp ? '$'+t.tp : ''}</td>
-          <td>${t.outcome || 'pending'}</td>
-          <td class="${cls}">${t.pnl ? '$'+t.pnl.toFixed(2) : ''}</td>
-          <td>${t.market_condition || ''}</td>
-        </tr>`;
-      });
-      tradesHtml += '</table>';
-      document.getElementById('tradesTable').innerHTML = trades.length ? tradesHtml : 'No trades today';
+      if (tradesRes.ok) {
+        const trades = await tradesRes.json();
+        let tradesHtml = '<table><tr><th>Time</th><th>Pair</th><th>Signal</th><th>Strategy</th><th>Entry</th><th>SL</th><th>TP</th><th>Outcome</th><th>P&L</th><th>Market</th></tr>';
+        trades.forEach(t => {
+          let cls = (t.pnl > 0) ? 'profit' : (t.pnl < 0) ? 'loss' : '';
+          tradesHtml += `<tr>
+            <td>${t.timestamp ? t.timestamp.substr(11,8) : ''}</td>
+            <td>${t.pair || currentPair}</td>
+            <td>${t.signal}</td>
+            <td>${t.strategy || ''}</td>
+            <td>${t.entry ? '$'+t.entry : ''}</td>
+            <td>${t.sl ? '$'+t.sl : ''}</td>
+            <td>${t.tp ? '$'+t.tp : ''}</td>
+            <td>${t.outcome || 'pending'}</td>
+            <td class="${cls}">${t.pnl ? '$'+t.pnl.toFixed(2) : ''}</td>
+            <td>${t.market_condition || ''}</td>
+          </tr>`;
+        });
+        tradesHtml += '</table>';
+        document.getElementById('tradesTable').innerHTML = trades.length ? tradesHtml : 'No trades today';
+      } else { document.getElementById('tradesTable').innerHTML = 'Unable to load'; }
 
+      // Trade reviews
       const reviewsRes = await fetch(`/trade-reviews?pair=${currentPair}`);
-      const reviews = await reviewsRes.json();
-      let reviewHtml = '';
-      reviews.forEach(t => {
-        let gemini = '';
-        try { gemini = JSON.parse(t.gemini_insight).summary; } catch(e) {}
-        reviewHtml += `<div class="trade-review">
-          <b>${t.signal}</b> @ ${t.entry} → ${t.outcome} (${t.pnl})<br/>
-          <em>${gemini || 'No A.A.G.A review'}</em>
-        </div>`;
-      });
-      document.getElementById('tradeReviews').innerHTML = reviewHtml || 'No reviews yet';
+      if (reviewsRes.ok) {
+        const reviews = await reviewsRes.json();
+        let reviewHtml = '';
+        reviews.forEach(t => {
+          let gemini = '';
+          try { gemini = JSON.parse(t.gemini_insight).summary; } catch(e) {}
+          reviewHtml += `<div class="trade-review">
+            <b>${t.signal}</b> @ ${t.entry} → ${t.outcome} (${t.pnl})<br/>
+            <em>${gemini || 'No A.A.G.A review'}</em>
+          </div>`;
+        });
+        document.getElementById('tradeReviews').innerHTML = reviewHtml || 'No reviews yet';
+      } else { document.getElementById('tradeReviews').innerHTML = 'Unable to load'; }
+
       document.getElementById('lastUpdate').innerText = 'Last update: ' + new Date().toLocaleTimeString();
     } catch (e) {
       document.getElementById('connectionStatus').innerHTML = '● OFFLINE';
@@ -360,29 +368,76 @@
     }
   }
 
-  // ---------- Explainable AI Loader (ENHANCED) ----------
-  async function loadExplainableAI() {
-    const container = document.getElementById('explainableAI');
+  // ---------- Helper loaders (never change connectionStatus) ----------
+  async function loadCard(url, containerId, formatter) {
+    const container = document.getElementById(containerId);
     container.innerHTML = 'Loading...';
     try {
-      const res = await fetch(`/explain/${currentPair}`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Status ' + res.status);
       const data = await res.json();
-      if (data.error) {
-        container.innerHTML = `<span style="color:#ff4466;">${data.error}</span>`;
-        return;
+      container.innerHTML = formatter(data);
+    } catch(e) {
+      container.innerHTML = '<span class="error-msg">Failed to load</span>';
+    }
+  }
+
+  function loadDailyStrategyStats() {
+    loadCard(`/strategy-performance?pair=${currentPair}`, 'dailyStrategyStats', data => {
+      let html = '';
+      for (const [name, stats] of Object.entries(data)) {
+        html += `<div class="trade-review"><b>${name}</b>: Trades ${stats.total_trades}, Wins ${stats.wins}, Losses ${stats.losses}, Win Rate ${stats.win_rate}%, P&L $${stats.pnl}</div>`;
       }
-      // Build a nice human-readable display
+      return html || 'No completed trades today';
+    });
+  }
+
+  function loadWeeklyBacktest() {
+    loadCard(`/weekly-backtest?pair=${currentPair}`, 'weeklyBacktest', data => {
+      if (data.error) return `<span class="error-msg">${data.error}</span>`;
+      let html = '';
+      data.results.forEach(r => html += `<div class="trade-review"><b>${r.strategy}</b>: Trades ${r.trades}, Win Rate ${r.win_rate}%, ROI ${r.roi}%, Balance $${r.final_balance}</div>`);
+      if (data.best_strategy) html += `<p><b>🏆 Best: ${data.best_strategy}</b></p>`;
+      return html || 'No data';
+    });
+  }
+
+  function loadMarketConditionStats() {
+    loadCard(`/market-condition-performance?pair=${currentPair}`, 'marketConditionStats', data => {
+      let html = '';
+      for (const [cond, stats] of Object.entries(data)) {
+        html += `<div class="trade-review"><b>${cond}</b>: Trades ${stats.total_trades}, Win Rate ${stats.win_rate}%, P&L $${stats.pnl}</div>`;
+      }
+      return html || 'No trades today';
+    });
+  }
+
+  function loadAiInsights() {
+    loadCard('/ai-insights', 'aiInsights', data => `<pre style="white-space:pre-wrap;">${JSON.stringify(data, null, 2)}</pre>`);
+  }
+
+  function loadEconomicCalendar() {
+    loadCard('/economic-calendar', 'economicCalendar', data => {
+      if (data.events && data.events.length > 0) {
+        let html = '';
+        data.events.forEach(e => html += `<div class="trade-review">${e.event} at ${new Date(e.time).toUTCString()}</div>`);
+        return html;
+      }
+      return 'No upcoming events in next 24h';
+    });
+  }
+
+  function loadExplainableAI() {
+    loadCard(`/explain/${currentPair}`, 'explainableAI', data => {
+      if (data.error) return `<span class="error-msg">${data.error}</span>`;
       let html = `<div class="explain-section">
-        <h4>📊 Master Decision: <span class="${data.master_decision.signal === 'BUY' ? 'signal-buy' : (data.master_decision.signal === 'SELL' ? 'signal-sell' : 'signal-hold')}">${data.master_decision.signal}</span> (confidence: ${(data.master_decision.confidence*100).toFixed(0)}%)</h4>
+        <h4>📊 Master Decision: <span class="${data.master_decision.signal === 'BUY' ? 'signal-buy' : (data.master_decision.signal === 'SELL' ? 'signal-sell' : 'signal-hold')}">${data.master_decision.signal}</span> (${(data.master_decision.confidence*100).toFixed(0)}%)</h4>
         <p><b>Reason:</b> ${data.master_decision.reason}</p>
-        <h4>🗳 Voting Weights</h4>
-        <ul>`;
-      for (const [name, weight] of Object.entries(data.voting_weights || {})) {
-        html += `<li>${name}: ${(weight*100).toFixed(0)}%</li>`;
+        <h4>🗳 Voting Weights</h4><ul>`;
+      for (const [name, w] of Object.entries(data.voting_weights || {})) {
+        html += `<li>${name}: ${(w*100).toFixed(0)}%</li>`;
       }
-      html += `</ul>
-        <h4>📈 Per-Strategy Signals</h4>
-        <ul>`;
+      html += `</ul><h4>📈 Signals</h4><ul>`;
       (data.signals || []).forEach(s => {
         html += `<li>${s.name}: <span class="${s.signal==='BUY'?'signal-buy':(s.signal==='SELL'?'signal-sell':'signal-hold')}">${s.signal}</span>`;
         if (s.entry_zone) html += ` @ ${s.entry_zone[0]?.toFixed(2)}-${s.entry_zone[1]?.toFixed(2)}`;
@@ -390,24 +445,29 @@
       });
       html += `</ul>`;
       if (data.random_forest_importance) {
-        html += `<h4>🌲 Random Forest Feature Importance</h4><ul>`;
-        data.random_forest_importance.forEach((imp, i) => {
-          html += `<li>Feature ${i+1}: ${(imp*100).toFixed(1)}%</li>`;
-        });
+        html += `<h4>🌲 RF Importance</h4><ul>`;
+        data.random_forest_importance.forEach((imp,i) => html += `<li>Feature ${i+1}: ${(imp*100).toFixed(1)}%</li>`);
         html += `</ul>`;
       }
-      if (data.gemini_reasoning) {
-        html += `<h4>🤖 Gemini Reasoning</h4><p>${data.gemini_reasoning}</p>`;
-      }
+      if (data.gemini_reasoning) html += `<h4>🤖 Gemini</h4><p>${data.gemini_reasoning}</p>`;
       html += `</div>`;
-      container.innerHTML = html;
-    } catch(e) {
-      container.innerHTML = '<span style="color:#ff4466;">Failed to load explanation</span>';
-    }
+      return html;
+    });
   }
 
-  // Other helper functions (loadDailyStrategyStats, loadWeeklyBacktest, etc.) remain the same as before.
-  // For brevity, they are omitted here; copy them from the previous dashboard.html.
+  function loadNLPSentiment() {
+    loadCard('/news-sentiment', 'nlpSentiment', data => {
+      let html = `<p><b>${data.summary || ''}</b></p>`;
+      if (data.headlines && data.headlines.length > 0) {
+        data.headlines.forEach(h => html += `<div class="trade-review">${h.title || h}</div>`);
+      }
+      return html || 'No headlines';
+    });
+  }
+
+  function loadDebugInfo() {
+    loadCard('/debug', 'debugInfo', data => `<pre style="white-space:pre-wrap; font-size:0.8rem;">${JSON.stringify(data, null, 2)}</pre>`);
+  }
 
   // Initial load
   fetchAll();
