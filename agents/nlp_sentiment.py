@@ -1,11 +1,10 @@
 # agents/nlp_sentiment.py
 import feedparser, json, datetime, time as _time
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 class NLPSentimentAgent:
     """
-    Advanced sentiment analysis using FinBERT model.
+    Advanced sentiment analysis using FinBERT.
     Falls back to keyword analysis if model fails to load.
     """
     def __init__(self, model_name: str = "ProsusAI/finbert"):
@@ -17,6 +16,7 @@ class NLPSentimentAgent:
             "https://www.investing.com/rss/news_25.rss"
         ]
         try:
+            from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             model = AutoModelForSequenceClassification.from_pretrained(model_name)
             self.pipeline = pipeline("text-classification", model=model, tokenizer=tokenizer)
@@ -42,15 +42,6 @@ class NLPSentimentAgent:
         return headlines[:10]
 
     def analyze(self) -> Dict[str, Any]:
-        """
-        Returns dict with:
-          - sentiment: "BUY"/"SELL"/"HOLD"
-          - confidence: 0-1
-          - prob_hold: 0-1   (for Master Agent override)
-          - expected_impact_pips: float
-          - summary: string
-          - headlines: list of analyzed headlines
-        """
         headlines = self.fetch_headlines()
         if not headlines:
             return {
@@ -59,7 +50,6 @@ class NLPSentimentAgent:
             }
 
         if self.available and self.pipeline:
-            # Analyze each headline with FinBERT
             analyzed = []
             bullish = bearish = neutral = 0
             total_conf = 0
@@ -80,12 +70,11 @@ class NLPSentimentAgent:
                     "sentiment": label,
                     "confidence": round(score, 2)
                 })
-            # Determine overall sentiment
             n = len(analyzed)
             if bullish > bearish and bullish > neutral:
                 sentiment = "BUY"
                 prob_hold = 0.1
-                impact = bullish * 50   # pips estimate
+                impact = bullish * 50
             elif bearish > bullish and bearish > neutral:
                 sentiment = "SELL"
                 prob_hold = 0.1
@@ -97,7 +86,7 @@ class NLPSentimentAgent:
             confidence = round(total_conf / n, 2) if n > 0 else 0.5
             summary = f"NLP sentiment: {bullish} bullish, {bearish} bearish, {neutral} neutral."
         else:
-            # Fallback to keyword analysis
+            # Fallback to keyword
             high_keywords = ["fomc","rate","cpi","nfp","gdp","war","recession","trump"]
             med_keywords  = ["unemployment","retail","gold","dollar","treasury","yield"]
             high_count = sum(1 for h in headlines for kw in high_keywords if kw in h['title'].lower())
@@ -116,7 +105,7 @@ class NLPSentimentAgent:
                 impact = 0
             confidence = 1.0 if prob_hold > 0 else 0.5
             summary = f"Keyword analysis: high={high_count}, med={med_count}"
-            analyzed = headlines  # no sentiment per headline
+            analyzed = headlines
 
         return {
             "sentiment": sentiment,
