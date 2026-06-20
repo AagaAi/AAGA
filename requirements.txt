@@ -10,9 +10,5 @@ google-generativeai
 scikit-learn
 matplotlib
 feedparser
-stable-baselines3
-gymnasium
-telegram
 yfinance
-transformers
-torch
+telegram
