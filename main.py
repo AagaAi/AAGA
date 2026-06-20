@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Yahoo Fallback Fix for Gold)
+# main.py – A.A.G.A AI (Phase 11: NLP Sentiment + All Previous Features)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -21,7 +21,7 @@ except:
             return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Unknown","current_price":0}
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
-from agents.news_agent import NewsSentimentAgent
+from agents.news_agent import NewsSentimentAgent   # <-- Updated NLP agent
 from agents.market_classifier import MarketClassifier
 from agents.strategy_factory import StrategyFactory
 from agents.weekly_pipeline import weekly_self_retraining
@@ -49,6 +49,13 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 telegram = TelegramNotifier()
 news_agent = NewsSentimentAgent()
+# Trigger model load early (optional, but helps first request)
+try:
+    news_agent.analyze()
+    print("📰 NLP news agent loaded successfully")
+except Exception as e:
+    print(f"⚠️ NLP news agent pre-load failed: {e}")
+
 market_classifier = MarketClassifier()
 regime_detector = RegimeDetector()
 
@@ -80,7 +87,6 @@ class RiskManager:
 
 # ---------- Multi‑pair ----------
 pairs = ["XAUUSD", "EURUSD"]
-# Yahoo ticker mapping for fallback
 YAHOO_SYMBOLS = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X"}
 
 active_strategies = {}
@@ -107,7 +113,7 @@ def run_news_analysis():
 # Fallback
 USE_FALLBACK = False
 
-# Default signal cache for every pair – so dashboard never sees "undefined"
+# Default signal cache for every pair
 latest_signals_cache = {
     pair: {
         "decision": "HOLD",
@@ -161,20 +167,17 @@ async def sdk_get_candles_metaapi(pair, timeframe, limit=500):
         return None
 
 def sdk_get_candles_yahoo(pair, interval="1m", period="5d"):
-    """Yahoo Finance fallback with correct symbol mapping."""
     try:
-        symbol = YAHOO_SYMBOLS.get(pair, pair + "=X")  # use mapping
+        symbol = YAHOO_SYMBOLS.get(pair, pair + "=X")
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
         if df.empty:
-            print(f"Yahoo: no data for {symbol}")
             return None
         candles = [{"time": str(i), "open": float(r["Open"]), "high": float(r["High"]),
                     "low": float(r["Low"]), "close": float(r["Close"]), "volume": float(r["Volume"])}
                    for i, r in df.iterrows()]
         return candles
-    except Exception as e:
-        print(f"Yahoo fetch error for {pair}: {e}")
+    except:
         return None
 
 async def sdk_get_candles_async(pair, timeframe, limit=500):
@@ -198,7 +201,6 @@ async def sdk_get_price_metaapi(pair):
     return None
 
 def sdk_get_price_yahoo(pair):
-    """Yahoo price with correct symbol."""
     try:
         symbol = YAHOO_SYMBOLS.get(pair, pair + "=X")
         ticker = yf.Ticker(symbol)
@@ -430,10 +432,19 @@ async def nightly_tasks():
         next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
         await asyncio.sleep((next_midnight - now).total_seconds())
         for pair in pairs:
+            # Retrain RandomForest
             for strat in active_strategies[pair]:
                 if strat.name == "RandomForest" and trade_memory.retrain_model(strat.model):
                     strat.trained = True
                     print(f"✅ {pair} RandomForest retrained")
+            # Train PPO agent if enough data
+            candles_1m = await sdk_get_candles_async(pair, "1m", 2000)
+            if candles_1m and len(candles_1m) > 200:
+                for strat in active_strategies[pair]:
+                    if strat.name == "PPO":
+                        strat.train(candles_1m, total_timesteps=5000)
+                        print(f"✅ {pair} PPO retrained")
+                        break
         rows = db_execute("""
             SELECT pair, strategy_used, COUNT(*) as total,
                    SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins
@@ -525,7 +536,8 @@ async def debug():
         "metaapi_healthy": _metaapi_healthy,
         "gemini_available": gemini_analyst.available,
         "pairs": status,
-        "last_intelligence": latest_intelligence.get("summary")
+        "last_intelligence": latest_intelligence.get("summary"),
+        "news_sentiment": news_agent.analyze().get("summary")  # quick summary
     }
 
 @app.get("/master-signal")
@@ -570,7 +582,7 @@ async def master_signal(pair: str = Query("XAUUSD")):
         print(f"Master signal error: {e}")
 
     cached = latest_signals_cache[pair]
-    return {**cached, "gemini_advice": latest_intelligence}
+    return {**cached, "gemini_advice": latest_intelligence, "news_sentiment": news_agent.analyze()}
 
 @app.get("/agent-log")
 def agent_log():
@@ -672,6 +684,10 @@ async def explain_decision(pair: str):
 @app.get("/ai-insights")
 async def ai_insights():
     return latest_intelligence
+
+@app.get("/news-sentiment")
+async def news_sentiment():
+    return news_agent.analyze()
 
 @app.get("/compare-strategies")
 async def compare_strategies_endpoint():
