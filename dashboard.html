@@ -228,6 +228,13 @@
     </div>
   </div>
 
+  <!-- NLP Sentiment Card -->
+  <div class="card" style="margin-bottom:30px;">
+    <h3>📰 News Sentiment (NLP)</h3>
+    <div id="nlpSentiment">--</div>
+    <button onclick="loadNLPSentiment()">Refresh Sentiment</button>
+  </div>
+
   <!-- Debug Card -->
   <div class="card" style="margin-bottom:30px;">
     <h3>🔧 System Debug</h3>
@@ -248,6 +255,7 @@
     loadAiInsights();
     loadEconomicCalendar();
     loadExplainableAI();
+    loadNLPSentiment();   // refresh sentiment as well
   }
 
   // ---------- fetchAll (only sets OFFLINE here) ----------
@@ -439,6 +447,33 @@
     } catch(e) { container.innerHTML = 'Failed to load explanation'; }
   }
 
+  // ---------- NLP Sentiment Loader ----------
+  async function loadNLPSentiment() {
+    const container = document.getElementById('nlpSentiment');
+    container.innerHTML = 'Loading...';
+    try {
+      const res = await fetch('/news-sentiment');
+      const data = await res.json();
+      let html = `<p><b>${data.summary || ''}</b></p>`;
+      if (data.headlines && data.headlines.length > 0) {
+        data.headlines.forEach(h => {
+          let cls = '';
+          if (h.sentiment === 'positive') cls = 'signal-buy';
+          else if (h.sentiment === 'negative') cls = 'signal-sell';
+          html += `<div class="trade-review">
+            <span class="${cls}">${h.sentiment || 'news'}</span> ${h.title}
+            ${h.confidence ? ` (${Math.round(h.confidence*100)}%)` : ''}
+          </div>`;
+        });
+      } else {
+        html += '<p>No headlines</p>';
+      }
+      container.innerHTML = html;
+    } catch(e) {
+      container.innerHTML = '<span style="color:#ff4466;">Failed to load sentiment</span>';
+    }
+  }
+
   // ---------- Debug info loader ----------
   async function loadDebugInfo() {
     const container = document.getElementById('debugInfo');
@@ -460,6 +495,7 @@
   loadAiInsights();
   loadEconomicCalendar();
   loadExplainableAI();
+  loadNLPSentiment();
   loadDebugInfo();
 
   // refresh intervals
@@ -469,6 +505,7 @@
   setInterval(loadWeeklyBacktest, 300000);
   setInterval(loadAiInsights, 300000);
   setInterval(loadEconomicCalendar, 600000);
+  setInterval(loadNLPSentiment, 120000);  // every 2 min
   setInterval(loadDebugInfo, 60000);
 </script>
 </body>
