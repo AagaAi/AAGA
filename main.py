@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Phase 11: NLP Sentiment + All Previous Features)
+# main.py – A.A.G.A AI (Phase 12: Genetic Algorithm + All Previous Features)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -19,15 +19,17 @@ except:
         name = "PPO"
         def get_signal(self, ohlc):
             return {"signal":"HOLD","entry_zone":None,"sl":None,"tp":None,"trend":"Unknown","current_price":0}
+        def train(self, *args, **kwargs): pass
 from agents.master_agent import MasterAgent
 from agents.memory import TradeMemory
-from agents.news_agent import NewsSentimentAgent   # <-- Updated NLP agent
+from agents.news_agent import NewsSentimentAgent
 from agents.market_classifier import MarketClassifier
 from agents.strategy_factory import StrategyFactory
 from agents.weekly_pipeline import weekly_self_retraining
 from agents.economic_calendar import is_high_impact_now, get_upcoming_events
 from agents.telegram_notifier import TelegramNotifier
 from agents.regime_detector import RegimeDetector
+from agents.genetic_optimizer import GeneticOptimizer   # <-- NEW
 from backtest import run_comparison as compare_strategies
 
 # ---------- Config ----------
@@ -49,7 +51,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 telegram = TelegramNotifier()
 news_agent = NewsSentimentAgent()
-# Trigger model load early (optional, but helps first request)
+# Trigger model load early
 try:
     news_agent.analyze()
     print("📰 NLP news agent loaded successfully")
@@ -58,6 +60,7 @@ except Exception as e:
 
 market_classifier = MarketClassifier()
 regime_detector = RegimeDetector()
+genetic_optimizer = GeneticOptimizer()   # <-- NEW
 
 # ---------- Risk Manager ----------
 class RiskManager:
@@ -425,7 +428,7 @@ async def autonomous_trading_loop():
                 print(f"Autonomous loop error for {pair}: {e}")
         await asyncio.sleep(AUTONOMOUS_INTERVAL_SEC)
 
-# ---------- Nightly + Weekly ----------
+# ---------- Nightly + Weekly (Genetic Optimizer added) ----------
 async def nightly_tasks():
     while True:
         now = datetime.datetime.utcnow()
@@ -437,7 +440,7 @@ async def nightly_tasks():
                 if strat.name == "RandomForest" and trade_memory.retrain_model(strat.model):
                     strat.trained = True
                     print(f"✅ {pair} RandomForest retrained")
-            # Train PPO agent if enough data
+            # Train PPO if enough data (dummy method exists)
             candles_1m = await sdk_get_candles_async(pair, "1m", 2000)
             if candles_1m and len(candles_1m) > 200:
                 for strat in active_strategies[pair]:
@@ -467,8 +470,36 @@ async def weekly_scheduler():
         if days_until_sunday == 0 and now > next_sunday:
             next_sunday = next_sunday + datetime.timedelta(weeks=1)
         await asyncio.sleep((next_sunday - now).total_seconds())
+
+        # 1. Run weekly self‑retraining (backtest + strategy factory)
         for pair in pairs:
             await weekly_self_retraining(DB_PATH, active_strategies[pair], master_agents[pair], trade_memory, gemini_analyst, strategy_factory)
+
+        # 2. Genetic optimization for EMA+DMI+BOS (the main strategy)
+        try:
+            print("🧬 Starting genetic optimizer...")
+            # Optimize for XAUUSD only (or loop over all pairs)
+            strat_to_optimize = active_strategies["XAUUSD"][0]  # EMA+DMI+BOS
+            base_cfg = {
+                "adx_threshold": strat_to_optimize.adx_threshold,
+                "slope_threshold": strat_to_optimize.slope_threshold,
+                "atr_multiplier_sl": strat_to_optimize.atr_multiplier_sl,
+                "rr_ratio": strat_to_optimize.rr_ratio,
+                "min_stop_distance": strat_to_optimize.min_stop_distance
+            }
+            best_params = await genetic_optimizer.optimize(EmaDmiStrategy, base_cfg=base_cfg)
+            if best_params:
+                genetic_optimizer.apply_to_strategy(strat_to_optimize, best_params)
+                # Also apply to EURUSD if desired
+                genetic_optimizer.apply_to_strategy(active_strategies["EURUSD"][0], best_params)
+                # Save to config.json
+                cfg = json.load(open(CONFIG_PATH))
+                cfg["parameters"] = best_params
+                with open(CONFIG_PATH, "w") as f:
+                    json.dump(cfg, f, indent=2)
+                print("✅ Genetic optimizer applied and config updated")
+        except Exception as e:
+            print(f"❌ Genetic optimizer error: {e}")
 
 @app.on_event("startup")
 async def startup():
@@ -537,7 +568,7 @@ async def debug():
         "gemini_available": gemini_analyst.available,
         "pairs": status,
         "last_intelligence": latest_intelligence.get("summary"),
-        "news_sentiment": news_agent.analyze().get("summary")  # quick summary
+        "news_sentiment": news_agent.analyze().get("summary")
     }
 
 @app.get("/master-signal")
