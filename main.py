@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Dashboard Fix + Debug Endpoint)
+# main.py – A.A.G.A AI (Yahoo Fallback Fix for Gold)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -80,6 +80,9 @@ class RiskManager:
 
 # ---------- Multi‑pair ----------
 pairs = ["XAUUSD", "EURUSD"]
+# Yahoo ticker mapping for fallback
+YAHOO_SYMBOLS = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X"}
+
 active_strategies = {}
 for pair in pairs:
     active_strategies[pair] = [
@@ -158,15 +161,20 @@ async def sdk_get_candles_metaapi(pair, timeframe, limit=500):
         return None
 
 def sdk_get_candles_yahoo(pair, interval="1m", period="5d"):
+    """Yahoo Finance fallback with correct symbol mapping."""
     try:
-        ticker = yf.Ticker(pair + "=X")
+        symbol = YAHOO_SYMBOLS.get(pair, pair + "=X")  # use mapping
+        ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
-        if df.empty: return None
+        if df.empty:
+            print(f"Yahoo: no data for {symbol}")
+            return None
         candles = [{"time": str(i), "open": float(r["Open"]), "high": float(r["High"]),
                     "low": float(r["Low"]), "close": float(r["Close"]), "volume": float(r["Volume"])}
                    for i, r in df.iterrows()]
         return candles
-    except:
+    except Exception as e:
+        print(f"Yahoo fetch error for {pair}: {e}")
         return None
 
 async def sdk_get_candles_async(pair, timeframe, limit=500):
@@ -190,8 +198,10 @@ async def sdk_get_price_metaapi(pair):
     return None
 
 def sdk_get_price_yahoo(pair):
+    """Yahoo price with correct symbol."""
     try:
-        ticker = yf.Ticker(pair + "=X")
+        symbol = YAHOO_SYMBOLS.get(pair, pair + "=X")
+        ticker = yf.Ticker(symbol)
         df = ticker.history(period="1d", interval="1m")
         if not df.empty: return df["Close"].iloc[-1]
     except: pass
@@ -522,11 +532,9 @@ async def debug():
 async def master_signal(pair: str = Query("XAUUSD")):
     if pair not in master_agents:
         return {"error": "Invalid pair"}
-    # Try to fetch fresh data; if fails, return cached data (which always exists)
     try:
         ohlc, strategy_signals = await run_all_strategies(pair)
         if ohlc is not None and strategy_signals is not None:
-            # We have fresh data – compute and update cache
             strategy_signals_list = [{"name": strat.name, "signal": sig.get("signal"),
                                       "entry_zone": sig.get("entry_zone"), "sl": sig.get("sl"),
                                       "tp": sig.get("tp"), "trend": sig.get("trend"),
@@ -561,7 +569,6 @@ async def master_signal(pair: str = Query("XAUUSD")):
     except Exception as e:
         print(f"Master signal error: {e}")
 
-    # Return cache (always populated)
     cached = latest_signals_cache[pair]
     return {**cached, "gemini_advice": latest_intelligence}
 
