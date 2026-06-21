@@ -1,27 +1,25 @@
 # agents/telegram_bot.py
 import os, json, sqlite3, datetime
 from typing import Optional
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 DB_PATH = "journal.db"
 
 class TelegramBotHandler:
-    """
-    Interactive Telegram bot for A.A.G.A AI.
-    Commands: /start, /status, /performance, /pause, /resume
-    """
     def __init__(self, token: str):
         self.token = token
         self.app = None
         self.paused = False
+        self.enabled = False
+        if token and len(token) > 10:
+            self.enabled = True
 
     async def start(self):
-        if not self.token:
-            print("Telegram token not set – bot disabled")
+        if not self.enabled:
+            print("🤖 Telegram bot token not set – bot disabled")
             return
         self.app = Application.builder().token(self.token).build()
-        # Register commands
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("performance", self.cmd_performance))
@@ -39,8 +37,11 @@ class TelegramBotHandler:
             await self.app.stop()
 
     async def send_message(self, chat_id: str, text: str):
-        if self.app:
-            await self.app.bot.send_message(chat_id=chat_id, text=text)
+        if self.app and self.enabled:
+            try:
+                await self.app.bot.send_message(chat_id=chat_id, text=text)
+            except Exception as e:
+                print(f"Telegram send error: {e}")
 
     # ---------- Command Handlers ----------
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,7 +56,6 @@ class TelegramBotHandler:
         )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Fetch live data from global cache (we'll import from main)
         from main import latest_signals_cache, _metaapi_healthy
         msg = f"📡 **A.A.G.A AI Status**\n"
         msg += f"MetaApi: {'✅ Online' if _metaapi_healthy else '❌ Offline'}\n"
@@ -81,20 +81,16 @@ class TelegramBotHandler:
         await update.message.reply_text(msg)
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        self.paused = True
-        # Tell main loop to pause
         from main import autonomous_trading_loop_paused
         autonomous_trading_loop_paused = True
-        await update.message.reply_text("⏸ Autonomous trading PAUSED. Use /resume to continue.")
+        await update.message.reply_text("⏸ Autonomous trading PAUSED.")
 
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        self.paused = False
         from main import autonomous_trading_loop_paused
         autonomous_trading_loop_paused = False
         await update.message.reply_text("▶️ Autonomous trading RESUMED.")
 
     async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Generate a simple text report (PDF would require reportlab, but text is enough for Telegram)
         from agents.pdf_report import generate_daily_report
         report = generate_daily_report()
         await update.message.reply_text(report)
