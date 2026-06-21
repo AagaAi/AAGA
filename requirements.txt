@@ -12,3 +12,4 @@ matplotlib
 feedparser
 yfinance
 telegram
+python-telegram-bot
