@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Portfolio Health + BTCUSD)
+# main.py – A.A.G.A AI (Portfolio Stats Initialized)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -299,13 +299,18 @@ async def keep_alive_task():
         except: pass
         await asyncio.sleep(180)
 
-# Store latest portfolio stats for dashboard
-latest_portfolio_stats = {"correlation": {}, "volatilities": {}, "allocation_weights": {}, "allocated_capital": {}}
+# Initialize portfolio stats with default values
+latest_portfolio_stats = {
+    "correlation": {},
+    "volatilities": {},
+    "allocation_weights": {},
+    "allocated_capital": {p: 10000/3 for p in pairs}
+}
 
 async def autonomous_trading_loop():
     global _metaapi_healthy, _account_cache, latest_signals_cache, latest_portfolio_stats
     while True:
-        # Update portfolio allocation (once per hour)
+        # Update portfolio allocation (once per cycle)
         try:
             candles_1h = {}
             for pair in pairs:
