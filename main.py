@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Portfolio Stats Initialized)
+# main.py – A.A.G.A AI (Phase 15: Heavy training offloaded)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -28,8 +28,6 @@ from agents.weekly_pipeline import weekly_self_retraining
 from agents.economic_calendar import is_high_impact_now, get_upcoming_events
 from agents.telegram_notifier import TelegramNotifier
 from agents.regime_detector import RegimeDetector
-from agents.genetic_optimizer import GeneticOptimizer
-from agents.gan_augmentor import LightweightGAN
 from agents.portfolio_manager import PortfolioManager
 from backtest import run_comparison as compare_strategies
 
@@ -59,8 +57,6 @@ except: pass
 
 market_classifier = MarketClassifier()
 regime_detector = RegimeDetector()
-genetic_optimizer = GeneticOptimizer()
-gan_model = LightweightGAN()
 
 # ---------- Risk Manager ----------
 class RiskManager:
@@ -88,7 +84,7 @@ class RiskManager:
         lot = max(0.01, round(lot, 2))
         return lot
 
-# ---------- Multi‑pair (3 pairs) ----------
+# ---------- Multi‑pair ----------
 pairs = ["XAUUSD", "EURUSD", "BTCUSD"]
 YAHOO_SYMBOLS = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "BTCUSD": "BTC-USD"}
 
@@ -299,18 +295,15 @@ async def keep_alive_task():
         except: pass
         await asyncio.sleep(180)
 
-# Initialize portfolio stats with default values
 latest_portfolio_stats = {
-    "correlation": {},
-    "volatilities": {},
-    "allocation_weights": {},
-    "allocated_capital": {p: 10000/3 for p in pairs}
+    "correlation": {}, "volatilities": {},
+    "allocation_weights": {}, "allocated_capital": {p: 10000/3 for p in pairs}
 }
 
 async def autonomous_trading_loop():
     global _metaapi_healthy, _account_cache, latest_signals_cache, latest_portfolio_stats
     while True:
-        # Update portfolio allocation (once per cycle)
+        # Update portfolio allocation
         try:
             candles_1h = {}
             for pair in pairs:
@@ -323,7 +316,6 @@ async def autonomous_trading_loop():
                 portfolio_mgr.update_prices(current_prices)
                 stats = portfolio_mgr.get_portfolio_stats(candles_1h, current_prices)
                 latest_portfolio_stats = stats
-                # Update risk managers' balance based on allocation
                 for pair in pairs:
                     alloc = stats['allocated_capital'].get(pair, 10000/3)
                     risk_managers[pair].balance = alloc
@@ -376,7 +368,7 @@ async def autonomous_trading_loop():
             except Exception as e: print(f"Loop error {pair}: {e}")
         await asyncio.sleep(60)
 
-# ---------- Nightly / Weekly ----------
+# ---------- Nightly ----------
 async def nightly_tasks():
     while True:
         now = datetime.datetime.utcnow(); next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5)
@@ -393,44 +385,14 @@ async def nightly_tasks():
         if rows:
             for r in rows: master_agents[r[0]].update_performance(r[1], (r[3] or 0)/r[2] if r[2]>0 else 0.5)
 
+# ---------- Weekly (only lightweight tasks) ----------
 async def weekly_scheduler():
     while True:
         now = datetime.datetime.utcnow(); days_until_sunday = (6 - now.weekday()) % 7
         next_sunday = now + datetime.timedelta(days=days_until_sunday); next_sunday = next_sunday.replace(hour=0, minute=5)
         if days_until_sunday==0 and now>next_sunday: next_sunday += datetime.timedelta(weeks=1)
         await asyncio.sleep((next_sunday - now).total_seconds())
-        for pair in pairs:
-            await weekly_self_retraining(DB_PATH, active_strategies[pair], master_agents[pair], trade_memory, gemini_analyst, strategy_factory)
-        # Genetic optimizer
-        try:
-            print("🧬 Genetic optimizer running...")
-            strat = active_strategies["XAUUSD"][0]
-            base_cfg = {"adx_threshold": strat.adx_threshold, "slope_threshold": strat.slope_threshold,
-                        "atr_multiplier_sl": strat.atr_multiplier_sl, "rr_ratio": strat.rr_ratio,
-                        "min_stop_distance": strat.min_stop_distance}
-            best = await genetic_optimizer.optimize(EmaDmiStrategy, base_cfg=base_cfg)
-            if best:
-                genetic_optimizer.apply_to_strategy(strat, best)
-                genetic_optimizer.apply_to_strategy(active_strategies["EURUSD"][0], best)
-                cfg = json.load(open(CONFIG_PATH)); cfg["parameters"] = best
-                with open(CONFIG_PATH,"w") as f: json.dump(cfg, f, indent=2)
-                print("✅ Genetic optimizer applied")
-        except Exception as e: print(f"Genetic error: {e}")
-        # GAN training
-        try:
-            print("🎨 Training GAN on historical candles...")
-            candles = await sdk_get_candles_async("XAUUSD", "1m", 2000)
-            if candles and len(candles)>500:
-                data = np.array([[c['open'], c['high'], c['low'], c['close']] for c in candles])
-                mn = data.min(axis=0); mx = data.max(axis=0)
-                norm = (data - mn) / (mx - mn + 1e-8)
-                gan_model.train(norm, epochs=500, batch_size=64)
-                synthetic = gan_model.generate_samples(500)
-                synthetic = synthetic * (mx - mn) + mn
-                with open("synthetic_candles.json", "w") as f:
-                    json.dump(synthetic.tolist(), f)
-                print("✅ GAN training complete, synthetic candles saved.")
-        except Exception as e: print(f"GAN error: {e}")
+        # No heavy training here – done by Render Cron Job
 
 @app.on_event("startup")
 async def startup():
