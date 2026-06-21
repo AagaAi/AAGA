@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Phase 15: Distributed Training & Cloud Scale - Complete)
+# main.py – A.A.G.A AI (Phase 16: Telegram Bot + All Previous Features - Complete)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -27,6 +27,8 @@ from agents.strategy_factory import StrategyFactory
 from agents.weekly_pipeline import weekly_self_retraining
 from agents.economic_calendar import is_high_impact_now, get_upcoming_events
 from agents.telegram_notifier import TelegramNotifier
+from agents.telegram_bot import TelegramBotHandler
+from agents.pdf_report import generate_daily_report
 from agents.regime_detector import RegimeDetector
 from agents.genetic_optimizer import GeneticOptimizer
 from agents.gan_augmentor import LightweightGAN
@@ -51,6 +53,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 gemini_analyst = GeminiAnalyst(GEMINI_API_KEY)
 telegram = TelegramNotifier()
+telegram_bot = TelegramBotHandler(TELEGRAM_BOT_TOKEN)
 news_agent = NewsSentimentAgent()
 try:
     news_agent.analyze()
@@ -61,6 +64,9 @@ market_classifier = MarketClassifier()
 regime_detector = RegimeDetector()
 genetic_optimizer = GeneticOptimizer()
 gan_model = LightweightGAN()
+
+# Global pause flag for Telegram commands
+autonomous_trading_loop_paused = False
 
 # ---------- Risk Manager ----------
 class RiskManager:
@@ -305,9 +311,13 @@ latest_portfolio_stats = {
 }
 
 async def autonomous_trading_loop():
-    global _metaapi_healthy, _account_cache, latest_signals_cache, latest_portfolio_stats
+    global _metaapi_healthy, _account_cache, latest_signals_cache, latest_portfolio_stats, autonomous_trading_loop_paused
     while True:
-        # Update portfolio allocation (lightweight)
+        if autonomous_trading_loop_paused:
+            await asyncio.sleep(10)
+            continue
+
+        # Update portfolio allocation
         try:
             candles_1h = {}
             for pair in pairs:
@@ -368,11 +378,15 @@ async def autonomous_trading_loop():
                     db_execute("INSERT INTO trade_journal (timestamp,pair,signal,entry,sl,tp,strategy_used,gemini_insight,market_condition) VALUES (?,?,?,?,?,?,?,?,?)",
                                (now.isoformat(), pair, decision_signal, entry, sl, tp, final_decision.get("strategy_used","Master"), "", regime), commit=True)
                     order = await execute_trade_async(pair, decision_signal, sl, tp, lot)
-                    if order: print(f"✅ {pair} Master Auto trade: {decision_signal}")
+                    if order:
+                        print(f"✅ {pair} Master Auto trade: {decision_signal}")
+                        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            await telegram_bot.send_message(TELEGRAM_CHAT_ID,
+                                f"A.A.G.A AI: {pair} {decision_signal} @ {entry}, SL {sl}, TP {tp}")
             except Exception as e: print(f"Loop error {pair}: {e}")
         await asyncio.sleep(60)
 
-# ---------- Nightly (lightweight) ----------
+# ---------- Nightly ----------
 async def nightly_tasks():
     while True:
         now = datetime.datetime.utcnow(); next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5)
@@ -388,6 +402,10 @@ async def nightly_tasks():
         rows = db_execute("SELECT pair, strategy_used, COUNT(*) as total, SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins FROM trade_journal WHERE date(timestamp) = date('now','-1 day') AND outcome IS NOT NULL GROUP BY pair, strategy_used", fetch=True)
         if rows:
             for r in rows: master_agents[r[0]].update_performance(r[1], (r[3] or 0)/r[2] if r[2]>0 else 0.5)
+        # Send daily report
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            report = generate_daily_report()
+            await telegram_bot.send_message(TELEGRAM_CHAT_ID, report)
 
 # ---------- Weekly (Lightweight Training) ----------
 async def weekly_scheduler():
@@ -437,6 +455,7 @@ async def startup():
     asyncio.create_task(nightly_tasks())
     asyncio.create_task(weekly_scheduler())
     asyncio.create_task(gemini_intelligence_cycle())
+    asyncio.create_task(telegram_bot.start())
 
 def init_db():
     con = sqlite3.connect(DB_PATH)
