@@ -1,4 +1,4 @@
-# main.py – A.A.G.A AI (Phase 14: Portfolio Management + BTCUSD)
+# main.py – A.A.G.A AI (Portfolio Health + BTCUSD)
 import os, json, sqlite3, datetime, time as _time, asyncio, aiohttp, feedparser
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -30,7 +30,7 @@ from agents.telegram_notifier import TelegramNotifier
 from agents.regime_detector import RegimeDetector
 from agents.genetic_optimizer import GeneticOptimizer
 from agents.gan_augmentor import LightweightGAN
-from agents.portfolio_manager import PortfolioManager   # <-- NEW
+from agents.portfolio_manager import PortfolioManager
 from backtest import run_comparison as compare_strategies
 
 # ---------- Config ----------
@@ -89,7 +89,7 @@ class RiskManager:
         return lot
 
 # ---------- Multi‑pair (3 pairs) ----------
-pairs = ["XAUUSD", "EURUSD", "BTCUSD"]   # <-- BTCUSD added
+pairs = ["XAUUSD", "EURUSD", "BTCUSD"]
 YAHOO_SYMBOLS = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "BTCUSD": "BTC-USD"}
 
 active_strategies = {}
@@ -109,7 +109,7 @@ for pair in pairs:
         lambda: {"prob_hold": news_agent.analyze().get("prob_hold", 0.0)}
     )
 
-portfolio_mgr = PortfolioManager(pairs)   # <-- NEW
+portfolio_mgr = PortfolioManager(pairs)
 
 def run_news_analysis():
     result = news_agent.analyze()
@@ -299,24 +299,28 @@ async def keep_alive_task():
         except: pass
         await asyncio.sleep(180)
 
+# Store latest portfolio stats for dashboard
+latest_portfolio_stats = {"correlation": {}, "volatilities": {}, "allocation_weights": {}, "allocated_capital": {}}
+
 async def autonomous_trading_loop():
-    global _metaapi_healthy, _account_cache, latest_signals_cache
+    global _metaapi_healthy, _account_cache, latest_signals_cache, latest_portfolio_stats
     while True:
-        # Update portfolio allocation (once per hour using 1h candles)
+        # Update portfolio allocation (once per hour)
         try:
             candles_1h = {}
             for pair in pairs:
                 candles_1h[pair] = await sdk_get_candles_async(pair, "1h", 200)
-            if candles_1h:
-                current_prices = {}
-                for pair in pairs:
-                    price = await sdk_get_price_async(pair)
-                    if price: current_prices[pair] = price
+            current_prices = {}
+            for pair in pairs:
+                price = await sdk_get_price_async(pair)
+                if price: current_prices[pair] = price
+            if candles_1h and current_prices:
                 portfolio_mgr.update_prices(current_prices)
                 stats = portfolio_mgr.get_portfolio_stats(candles_1h, current_prices)
+                latest_portfolio_stats = stats
                 # Update risk managers' balance based on allocation
                 for pair in pairs:
-                    alloc = stats['allocated_capital'][pair]
+                    alloc = stats['allocated_capital'].get(pair, 10000/3)
                     risk_managers[pair].balance = alloc
         except Exception as e: print(f"Portfolio update error: {e}")
 
@@ -561,19 +565,7 @@ async def news_sentiment(): return news_agent.analyze()
 
 @app.get("/portfolio-stats")
 async def portfolio_stats():
-    # Return latest computed portfolio stats
-    try:
-        candles_1h = {}
-        for pair in pairs:
-            candles_1h[pair] = await sdk_get_candles_async(pair, "1h", 200)
-        current_prices = {}
-        for pair in pairs:
-            price = await sdk_get_price_async(pair)
-            if price: current_prices[pair] = price
-        stats = portfolio_mgr.get_portfolio_stats(candles_1h, current_prices)
-        return stats
-    except Exception as e:
-        return {"error": str(e)}
+    return latest_portfolio_stats
 
 @app.get("/compare-strategies")
 async def compare_strategies_endpoint(): return await compare_strategies()
