@@ -1,4 +1,5 @@
-<!DOCTYPE html><html lang="en">
+<!DOCTYPE html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
@@ -125,7 +126,9 @@
 </head>
 <body>
 <div class="main-container">
-  <h1>⚡ A.A.G.A AI</h1><div class="status-bar">
+  <h1>⚡ A.A.G.A AI</h1>
+
+  <div class="status-bar">
     <span class="status-pill" id="connectionStatus">● CHECKING</span>
     <span class="status-pill" id="lastUpdate">Last update: --</span>
     <span class="status-pill" id="marketPhase">Phase: --</span>
@@ -135,7 +138,9 @@
       <option value="EURUSD">EURUSD</option>
       <option value="BTCUSD">BTCUSD</option>
     </select>
-  </div><div class="grid">
+  </div>
+
+  <div class="grid">
     <div class="card">
       <h3>💰 Spot Price</h3>
       <div class="value" id="currentPrice">$----.--</div>
@@ -158,7 +163,9 @@
       <h3>📊 Risk Brief</h3>
       <div class="risk-brief" id="riskBrief">--</div>
     </div>
-  </div><div class="grid">
+  </div>
+
+  <div class="grid">
     <div class="card">
       <h3>📡 Strategy Signals</h3>
       <div id="strategySignalsContainer" style="font-size:0.95rem;"></div>
@@ -167,34 +174,50 @@
       <h3>🤖 A.A.G.A Insight</h3>
       <div class="gemini-advice" id="geminiAdvice">--</div>
     </div>
-  </div><div class="grid">
+  </div>
+
+  <div class="grid">
     <div class="card">
       <h3>🧩 Agent Activity</h3>
       <div class="agent-log" id="agentLogContainer">--</div>
     </div>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>📈 Today's Trades</h3>
     <div id="tradesTable" style="overflow-x:auto;">--</div>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>🔍 Trade Reviews (A.A.G.A Gemini)</h3>
     <div id="tradeReviews">--</div>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>📊 Today's Strategy Performance</h3>
     <div id="dailyStrategyStats">--</div>
     <button onclick="loadDailyStrategyStats()">Refresh Daily Stats</button>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>📊 Weekly Backtest (Last 7 Days)</h3>
     <div id="weeklyBacktest">--</div>
     <button onclick="loadWeeklyBacktest()">Refresh Weekly Backtest</button>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>📈 Market Condition Performance (Today)</h3>
     <div id="marketConditionStats">--</div>
     <button onclick="loadMarketConditionStats()">Refresh Market Stats</button>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>🧠 AI Insights (Gemini)</h3>
     <div id="aiInsights">--</div>
     <button onclick="loadAiInsights()">Refresh Insights</button>
-  </div><div class="grid" style="margin-bottom:30px;">
+  </div>
+
+  <div class="grid" style="margin-bottom:30px;">
     <div class="card">
       <h3>📅 Economic Calendar (24h)</h3>
       <div id="economicCalendar">--</div>
@@ -205,20 +228,29 @@
       <div id="explainableAI">--</div>
       <button onclick="loadExplainableAI()">Explain Decision</button>
     </div>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>📰 News Sentiment (NLP)</h3>
     <div id="nlpSentiment">--</div>
     <button onclick="loadNLPSentiment()">Refresh Sentiment</button>
-  </div><!-- Portfolio Health Card --><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <!-- Portfolio Health Card -->
+  <div class="card" style="margin-bottom:30px;">
     <h3>📊 Portfolio Health</h3>
     <div id="portfolioStats">--</div>
     <button onclick="loadPortfolioStats()">Refresh Portfolio</button>
-  </div><div class="card" style="margin-bottom:30px;">
+  </div>
+
+  <div class="card" style="margin-bottom:30px;">
     <h3>🔧 System Debug</h3>
     <div id="debugInfo">--</div>
     <button onclick="loadDebugInfo()">Refresh Debug</button>
   </div>
-</div><script>
+</div>
+
+<script>
   let currentPair = 'XAUUSD';
 
   function onPairChange() {
@@ -389,102 +421,113 @@
   }
 
   function loadAiInsights() {
-    loadCard('/ai-insights', 'aiInsights', data => `<pre style="white-space:pre-wrap;">${JSON.stringify(data, null, 2)}</pre>`);}
+    loadCard('/ai-insights', 'aiInsights', data => `<pre style="white-space:pre-wrap;">${JSON.stringify(data, null, 2)}</pre>`);
+  }
 
-function loadEconomicCalendar() {
-loadCard('/economic-calendar', 'economicCalendar', data => {
-if (data.events && data.events.length > 0) {
-let html = '';
-data.events.forEach(e => html += <div class="trade-review">${e.event} at ${new Date(e.time).toUTCString()}</div>);
-return html;
-}
-return 'No upcoming events in next 24h';
-});
-}
+  function loadEconomicCalendar() {
+    loadCard('/economic-calendar', 'economicCalendar', data => {
+      if (data.events && data.events.length > 0) {
+        let html = '';
+        data.events.forEach(e => html += `<div class="trade-review">${e.event} at ${new Date(e.time).toUTCString()}</div>`);
+        return html;
+      }
+      return 'No upcoming events in next 24h';
+    });
+  }
 
-function loadExplainableAI() {
-loadCard(/explain/${currentPair}, 'explainableAI', data => {
-if (data.error) return <span class="error-msg">${data.error}</span>;
-let html = <div class="explain-section"> <h4>📊 Master Decision: <span class="${data.master_decision.signal === 'BUY' ? 'signal-buy' : (data.master_decision.signal === 'SELL' ? 'signal-sell' : 'signal-hold')}">${data.master_decision.signal}</span> (${(data.master_decision.confidence*100).toFixed(0)}%)</h4> <p><b>Reason:</b> ${data.master_decision.reason}</p> <h4>🗳 Voting Weights</h4><ul>;
-for (const [name, w] of Object.entries(data.voting_weights || {})) {
-html += <li>${name}: ${(w*100).toFixed(0)}%</li>;
-}
-html += </ul><h4>📈 Signals</h4><ul>;
-(data.signals || []).forEach(s => {
-html += <li>${s.name}: <span class="${s.signal==='BUY'?'signal-buy':(s.signal==='SELL'?'signal-sell':'signal-hold')}">${s.signal}</span>;
-if (s.entry_zone) html +=  @ ${s.entry_zone[0]?.toFixed(2)}-${s.entry_zone[1]?.toFixed(2)};
-html += </li>;
-});
-html += </ul>;
-if (data.random_forest_importance) {
-html += <h4>🌲 RF Importance</h4><ul>;
-data.random_forest_importance.forEach((imp,i) => html += <li>Feature ${i+1}: ${(imp*100).toFixed(1)}%</li>);
-html += </ul>;
-}
-if (data.gemini_reasoning) html += <h4>🤖 Gemini</h4><p>${data.gemini_reasoning}</p>;
-html += </div>;
-return html;
-});
-}
+  function loadExplainableAI() {
+    loadCard(`/explain/${currentPair}`, 'explainableAI', data => {
+      if (data.error) return `<span class="error-msg">${data.error}</span>`;
+      let html = `<div class="explain-section">
+        <h4>📊 Master Decision: <span class="${data.master_decision.signal === 'BUY' ? 'signal-buy' : (data.master_decision.signal === 'SELL' ? 'signal-sell' : 'signal-hold')}">${data.master_decision.signal}</span> (${(data.master_decision.confidence*100).toFixed(0)}%)</h4>
+        <p><b>Reason:</b> ${data.master_decision.reason}</p>
+        <h4>🗳 Voting Weights</h4><ul>`;
+      for (const [name, w] of Object.entries(data.voting_weights || {})) {
+        html += `<li>${name}: ${(w*100).toFixed(0)}%</li>`;
+      }
+      html += `</ul><h4>📈 Signals</h4><ul>`;
+      (data.signals || []).forEach(s => {
+        html += `<li>${s.name}: <span class="${s.signal==='BUY'?'signal-buy':(s.signal==='SELL'?'signal-sell':'signal-hold')}">${s.signal}</span>`;
+        if (s.entry_zone) html += ` @ ${s.entry_zone[0]?.toFixed(2)}-${s.entry_zone[1]?.toFixed(2)}`;
+        html += `</li>`;
+      });
+      html += `</ul>`;
+      if (data.random_forest_importance) {
+        html += `<h4>🌲 RF Importance</h4><ul>`;
+        data.random_forest_importance.forEach((imp,i) => html += `<li>Feature ${i+1}: ${(imp*100).toFixed(1)}%</li>`);
+        html += `</ul>`;
+      }
+      if (data.gemini_reasoning) html += `<h4>🤖 Gemini</h4><p>${data.gemini_reasoning}</p>`;
+      html += `</div>`;
+      return html;
+    });
+  }
 
-function loadNLPSentiment() {
-loadCard('/news-sentiment', 'nlpSentiment', data => {
-let html = <p><b>${data.summary || ''}</b></p>;
-if (data.headlines && data.headlines.length > 0) {
-data.headlines.forEach(h => html += <div class="trade-review">${h.title || h}</div>);
-}
-return html || 'No headlines';
-});
-}
+  function loadNLPSentiment() {
+    loadCard('/news-sentiment', 'nlpSentiment', data => {
+      let html = `<p><b>${data.summary || ''}</b></p>`;
+      if (data.headlines && data.headlines.length > 0) {
+        data.headlines.forEach(h => html += `<div class="trade-review">${h.title || h}</div>`);
+      }
+      return html || 'No headlines';
+    });
+  }
 
-function loadDebugInfo() {
-loadCard('/debug', 'debugInfo', data => <pre style="white-space:pre-wrap; font-size:0.8rem;">${JSON.stringify(data, null, 2)}</pre>);
-}
+  function loadDebugInfo() {
+    loadCard('/debug', 'debugInfo', data => `<pre style="white-space:pre-wrap; font-size:0.8rem;">${JSON.stringify(data, null, 2)}</pre>`);
+  }
 
-// ---------- Portfolio Stats ----------
-function loadPortfolioStats() {
-loadCard('/portfolio-stats', 'portfolioStats', data => {
-if (data.error) return <span class="error-msg">${data.error}</span>;
-let html = '<table style="width:100%"><tr><th>Pair</th><th>Allocation</th><th>Volatility</th></tr>';
-for (const pair of ['XAUUSD','EURUSD','BTCUSD']) {
-const vol = data.volatilities?.[pair] ? (data.volatilities[pair]*100).toFixed(2)+'%' : '--';
-const alloc = data.allocated_capital?.[pair] ? ''+data.allocated_capital[pair].toFixed(2) : '--';
-html += `<tr><td>{pair}</td><td>{alloc}</td><td>{vol}</td></tr>; } html += '</table>'; if (data.correlation && Object.keys(data.correlation).length) { html += '<h4 style="margin-top:10px">Correlation Matrix</h4>'; html += '<table style="width:100%"><tr><th></th>'; for (const pair of Object.keys(data.correlation)) { html += <th>{pair}</th>`; }
-html += '</tr>';
-for (const p1 of Object.keys(data.correlation)) {
-html += `<tr><td>{p1}</td>; for (const p2 of Object.keys(data.correlation)) { html += <td>${data.correlation[p1][p2]?.toFixed(2) || '--'}</td>`;
-}
-html += '</tr>';
-}
-html += '</table>';
-}
-return html;
-});
-}
+  // ---------- Portfolio Stats ----------
+  function loadPortfolioStats() {
+    loadCard('/portfolio-stats', 'portfolioStats', data => {
+      if (data.error) return `<span class="error-msg">${data.error}</span>`;
+      let html = '<table style="width:100%"><tr><th>Pair</th><th>Allocation</th><th>Volatility</th></tr>';
+      for (const pair of ['XAUUSD','EURUSD','BTCUSD']) {
+        const vol = data.volatilities?.[pair] ? (data.volatilities[pair]*100).toFixed(2)+'%' : '--';
+        const alloc = data.allocated_capital?.[pair] ? '$'+data.allocated_capital[pair].toFixed(2) : '--';
+        html += `<tr><td>${pair}</td><td>${alloc}</td><td>${vol}</td></tr>`;
+      }
+      html += '</table>';
+      if (data.correlation && Object.keys(data.correlation).length) {
+        html += '<h4 style="margin-top:10px">Correlation Matrix</h4>';
+        html += '<table style="width:100%"><tr><th></th>';
+        for (const pair of Object.keys(data.correlation)) { html += `<th>${pair}</th>`; }
+        html += '</tr>';
+        for (const p1 of Object.keys(data.correlation)) {
+          html += `<tr><td>${p1}</td>`;
+          for (const p2 of Object.keys(data.correlation)) {
+            html += `<td>${data.correlation[p1][p2]?.toFixed(2) || '--'}</td>`;
+          }
+          html += '</tr>';
+        }
+        html += '</table>';
+      }
+      return html;
+    });
+  }
 
-// initial load
-fetchAll();
-loadDailyStrategyStats();
-loadWeeklyBacktest();
-loadMarketConditionStats();
-loadAiInsights();
-loadEconomicCalendar();
-loadExplainableAI();
-loadNLPSentiment();
-loadPortfolioStats();
-loadDebugInfo();
+  // initial load
+  fetchAll();
+  loadDailyStrategyStats();
+  loadWeeklyBacktest();
+  loadMarketConditionStats();
+  loadAiInsights();
+  loadEconomicCalendar();
+  loadExplainableAI();
+  loadNLPSentiment();
+  loadPortfolioStats();
+  loadDebugInfo();
 
-// refresh intervals
-setInterval(fetchAll, 30000);
-setInterval(loadDailyStrategyStats, 60000);
-setInterval(loadMarketConditionStats, 60000);
-setInterval(loadWeeklyBacktest, 300000);
-setInterval(loadAiInsights, 300000);
-setInterval(loadEconomicCalendar, 600000);
-setInterval(loadNLPSentiment, 120000);
-setInterval(loadPortfolioStats, 300000);
-setInterval(loadDebugInfo, 60000);
+  // refresh intervals
+  setInterval(fetchAll, 30000);
+  setInterval(loadDailyStrategyStats, 60000);
+  setInterval(loadMarketConditionStats, 60000);
+  setInterval(loadWeeklyBacktest, 300000);
+  setInterval(loadAiInsights, 300000);
+  setInterval(loadEconomicCalendar, 600000);
+  setInterval(loadNLPSentiment, 120000);
+  setInterval(loadPortfolioStats, 300000);
+  setInterval(loadDebugInfo, 60000);
 </script>
-
 </body>
 </html>
