@@ -7,7 +7,8 @@ class RandomForestStrategy:
     இது பெயரளவிற்காக மட்டுமே (Dummy Placeholder) உருவாக்கப்பட்டுள்ளது.
     """
     def __init__(self, *args, **kwargs):
-        pass # மெமரியைச் சேமிக்க எதையும் லோட் செய்ய வேண்டாம்
+        # MasterAgent-ன் எரரைத் தவிர்க்கப் பெயர் சேர்க்கப்பட்டுள்ளது
+        self.name = "RandomForestStrategy" 
 
     def train(self, *args, **kwargs):
         pass # ட்ரெய்னிங் செய்ய வேண்டாம்
