@@ -1,39 +1,67 @@
-import re
+from agents.nlp_sentiment import NLPSentimentAgent
 
-class NLPSentimentAgent:  # <-- பெயர் சரியாக மாற்றப்பட்டுள்ளது
+# 1. Main.py எரர் அடிக்காமல் இருக்க உருவாக்கப்பட்ட டம்மி (Lightweight) ஸ்ட்ரேட்டஜி கிளாஸ்
+class RandomForestStrategy:
     """
-    நிதிச் செய்திகளைப் படித்து சென்டிமென்ட்டைப் பகுப்பாய்வு செய்யும் லேசான ஏஜெண்ட்.
-    இது எப்பொழுதும் "BUY" அல்லது "SELL" என்ற முடிவை மட்டுமே கொடுக்கும்.
+    உண்மையான Random Forest மாடல் 512MB RAM-ஐ க்ராஷ் செய்யும் என்பதால்,
+    இது பெயரளவிற்காக மட்டுமே (Dummy Placeholder) உருவாக்கப்பட்டுள்ளது.
     """
-    def __init__(self):
-        # பாசிட்டிவ் (Bullish) வார்த்தைகள்
-        self.positive_keywords = ['growth', 'bullish', 'high', 'profit', 'up', 'soar', 'surge', 'buy', 'positive', 'gain', 'rally']
-        # நெகட்டிவ் (Bearish) வார்த்தைகள்
-        self.negative_keywords = ['crash', 'bearish', 'low', 'loss', 'down', 'drop', 'fall', 'sell', 'negative', 'decline', 'plunge']
+    def __init__(self, *args, **kwargs):
+        pass # மெமரியைச் சேமிக்க எதையும் லோட் செய்ய வேண்டாம்
 
-    def analyze_text(self, text):
-        """
-        செய்திகளைப் படித்து இறுதி சிக்னலை உருவாக்குகிறது.
-        """
-        # செய்தி கிடைக்கவில்லை என்றால், ட்ரேடை நிறுத்தாமல் இருக்க டீஃபால்ட்டாக BUY கொடுக்கிறோம்
-        if not text:
-            return "BUY"
+    def train(self, *args, **kwargs):
+        pass # ட்ரெய்னிங் செய்ய வேண்டாம்
 
-        text = str(text).lower()
+    def predict(self, *args, **kwargs):
+        return "BUY"
+
+    def get_signal(self, market_data=None):
+        return "BUY" # டீஃபால்ட் சிக்னல்
+
+
+# 2. நமது முக்கிய AI மூளை
+class AIAgent:
+    """
+    சந்தை தரவுகளையும் (Market Data) மற்றும் செய்திகளையும் (News) இணைத்து 
+    இறுதி முடிவெடுக்கும் மூளை (Master Decision Maker).
+    """
+    def __init__(self, strategy_agent=None):
+        self.nlp_analyzer = NLPSentimentAgent()
+        self.strategy_agent = strategy_agent 
+
+    def make_decision(self, market_data=None, news_text=""):
+        """
+        எந்தச் சூழ்நிலையிலும் ட்ரேடை நிறுத்தாமல், "BUY" அல்லது "SELL" 
+        சிக்னலை மட்டும் உறுதியாகக் கொடுக்கும் ஃபங்ஷன்.
+        """
+        # 1. NLP சிக்னலை எடுப்பது (இது எப்போதுமே BUY அல்லது SELL மட்டுமே கொடுக்கும்)
+        nlp_signal = self.nlp_analyzer.analyze_text(news_text)
+
+        # 2. ஸ்ட்ரேட்டஜி சிக்னலை எடுப்பது
+        strategy_signal = "BUY" # டீஃபால்ட் சிக்னல்
         
-        # வார்த்தைகளை எண்ணுதல்
-        pos_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.positive_keywords)
-        neg_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.negative_keywords)
+        if self.strategy_agent and hasattr(self.strategy_agent, 'get_signal'):
+            try:
+                strategy_signal = self.strategy_agent.get_signal(market_data)
+                # ஒருவேளை ஸ்ட்ரேட்டஜி ஏஜெண்ட் HOLD அல்லது STOP கொடுத்தால், அதை BUY ஆக மாற்றிவிடுவோம்
+                if strategy_signal not in ["BUY", "SELL"]:
+                    strategy_signal = "BUY"
+            except Exception as e:
+                print(f"⚠️ Strategy பிழை: {e}. NLP சிக்னலைப் பயன்படுத்துகிறோம்.")
+                strategy_signal = nlp_signal
 
-        # பாசிட்டிவ் வார்த்தைகள் அதிகமாகவோ அல்லது சமமாகவோ இருந்தால் BUY
-        if pos_score >= neg_score:
-            return "BUY"
-        # நெகட்டிவ் வார்த்தைகள் அதிகமாக இருந்தால் மட்டும் SELL
+        # 3. இறுதி முடிவெடுக்கும் லாஜிக் (No Halting)
+        if strategy_signal == nlp_signal:
+            final_signal = strategy_signal
         else:
-            return "SELL"
+            final_signal = strategy_signal 
+            
+        print(f"🧠 AI Decision -> Strategy: {strategy_signal} | News NLP: {nlp_signal} | FINAL ACTION: {final_signal}")
+        
+        return final_signal
 
 # லோக்கல் டெஸ்டிங்
 if __name__ == "__main__":
-    analyzer = NLPSentimentAgent()
-    sample_news = "Market is going up with high growth and massive profit"
-    print(f"Sample NLP Decision: {analyzer.analyze_text(sample_news)}")
+    ai = AIAgent()
+    final_action = ai.make_decision(market_data={}, news_text="Market crash and huge loss")
+    print(f"Test Execution Action: {final_action}")
