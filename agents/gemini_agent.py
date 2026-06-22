@@ -1,74 +1,38 @@
-# agents/gemini_agent.py
-import os, json, time as _time
+import os
 import google.generativeai as genai
-from typing import Optional
 
-class GeminiAnalyst:
-    def __init__(self, api_key: str = ""):
-        self.available = False
-        self.consecutive_errors = 0
-        self.max_errors = 2
-        self.disabled_until = 0
-        self.last_call = 0
-        self.call_interval = 10
-        key = api_key or os.environ.get("GEMINI_API_KEY", "")
-        if not key:
-            self.error = "GEMINI_API_KEY not set"
-            return
+class GeminiAgent:
+    """
+    Gemini API மூலம் அட்வைஸ் வழங்கும் ஏஜெண்ட். 
+    API வேலை செய்யவில்லை என்றாலும் எரர் அடிக்காமல் சிஸ்டத்தைக் காப்பாற்றும்.
+    """
+    def __init__(self):
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.is_active = False
+        
+        if self.api_key:
+            try:
+                genai.configure(api_key=self.api_key)
+                # லேட்டஸ்ட் மாடலான gemini-1.5-flash-ஐப் பயன்படுத்துகிறோம்
+                self.model = genai.GenerativeModel('gemini-1.5-flash')
+                self.is_active = True
+                print("✅ Gemini Agent தயார்!")
+            except Exception as e:
+                print(f"⚠️ Gemini Init Error: {e}")
+
+    def analyze(self, prompt=""):
+        return self.get_advice(prompt)
+
+    def get_advice(self, prompt=""):
+        """Gemini-யிடம் இருந்து பதிலைப் பெறுகிறது"""
+        if not self.is_active:
+            return "Gemini API குறியீடு இல்லை (அல்லது) லிமிட் முடிந்தது. AI தனது சொந்த உத்திகளைப் பயன்படுத்தி ட்ரேட் செய்யும்."
+        
         try:
-            genai.configure(api_key=key)
-            self.model = genai.GenerativeModel("models/gemini-2.0-flash")
-            self.available = True
-            print("✅ Gemini 2.0 Flash connected (quota‑safe mode)")
-        except Exception as e:
-            self.error = str(e)
-
-    def _should_throttle(self) -> bool:
-        now = _time.time()
-        if self.disabled_until > now:
-            return True
-        if now - self.last_call < self.call_interval:
-            return True
-        return False
-
-    def _safe_generate(self, prompt: str) -> Optional[str]:
-        if not self.available:
-            return None
-        if self._should_throttle():
-            return None
-        self.last_call = _time.time()
-        try:
-            response = self.model.generate_content(prompt)
-            self.consecutive_errors = 0
+            # ஸ்ட்ரிங் பார்மட்டிற்கு மாற்றி அனுப்புகிறோம்
+            response = self.model.generate_content(str(prompt))
             return response.text
         except Exception as e:
-            self.consecutive_errors += 1
-            print(f"Gemini API error: {e}")
-            if self.consecutive_errors >= self.max_errors:
-                self.disabled_until = _time.time() + 1800
-                print("⚠️ Gemini disabled for 30 minutes")
-            return None
+            print(f"⚠️ Gemini API Error: {e}")
+            return "Gemini நெட்வொர்க் பிழை. AI சொந்த உத்தியைப் பயன்படுத்துகிறது."
 
-    def analyze_daily_trades(self, trades: list) -> dict:
-        if not self.available or not trades:
-            return {"summary": "Gemini unavailable or no trades", "recommendations": []}
-        prompt = f"""
-You are a senior quantitative analyst. Below are today's completed XAUUSD trades:
-{json.dumps(trades[:10], default=str)}
-
-Analyze them. Identify:
-1. Main patterns leading to wins/losses.
-2. Suggestions for parameter adjustments.
-Return ONLY a JSON object with keys: "summary", "patterns", "parameter_suggestions" (dict of param: value), "confidence" (0-1).
-"""
-        text = self._safe_generate(prompt)
-        if not text:
-            return {"summary": "Gemini call failed", "recommendations": []}
-        try:
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-            return json.loads(text)
-        except:
-            return {"summary": text, "recommendations": []}
