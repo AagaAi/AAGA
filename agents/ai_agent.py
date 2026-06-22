@@ -1,138 +1,39 @@
-# agents/ai_agent.py
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from collections import deque
-import random
-import warnings
-warnings.filterwarnings('ignore')
+import re
 
-class RandomForestStrategy:
+class NLPSentimentAgent:  # <-- பெயர் சரியாக மாற்றப்பட்டுள்ளது
     """
-    Self-learning strategy using Random Forest.
-    Fallback: simple trend following if model not trained.
-    TP = AI's own calculation minus tp_reduction_points (to account for spread/slippage).
+    நிதிச் செய்திகளைப் படித்து சென்டிமென்ட்டைப் பகுப்பாய்வு செய்யும் லேசான ஏஜெண்ட்.
+    இது எப்பொழுதும் "BUY" அல்லது "SELL" என்ற முடிவை மட்டுமே கொடுக்கும்.
     """
-    def __init__(self, config=None):
-        self.name = "RandomForest"
-        self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
-        self.trained = False
-        self.feature_window = 10
-        self.balance = 10000.0
-        self.min_stop_distance = 1.10
-        self.atr_multiplier_sl = 1.5
-        self.atr_multiplier_tp = 2.0
-        self.tp_reduction_points = 2.10   # subtract from calculated TP
+    def __init__(self):
+        # பாசிட்டிவ் (Bullish) வார்த்தைகள்
+        self.positive_keywords = ['growth', 'bullish', 'high', 'profit', 'up', 'soar', 'surge', 'buy', 'positive', 'gain', 'rally']
+        # நெகட்டிவ் (Bearish) வார்த்தைகள்
+        self.negative_keywords = ['crash', 'bearish', 'low', 'loss', 'down', 'drop', 'fall', 'sell', 'negative', 'decline', 'plunge']
 
-    def _make_features(self, ohlc_dict):
-        """Build feature vector from last 10 candles."""
-        closes = pd.Series(ohlc_dict['closes'])
-        highs  = pd.Series(ohlc_dict['highs'])
-        lows   = pd.Series(ohlc_dict['lows'])
-        opens  = pd.Series(ohlc_dict.get('opens', closes.shift(1).fillna(closes.iloc[0])))
-        if len(closes) < self.feature_window + 1:
-            return None, 0
-
-        features = []
-        for i in range(1, self.feature_window + 1):
-            features.extend([
-                closes.iloc[-i] / 2000,
-                highs.iloc[-i] / 2000,
-                lows.iloc[-i] / 2000,
-                opens.iloc[-i] / 2000,
-                (closes.iloc[-i] - closes.iloc[-i-1]) / 10,
-                (highs.iloc[-i] - lows.iloc[-i]) / 10,
-            ])
-        sma5 = closes.rolling(5).mean().iloc[-1] / 2000
-        sma10 = closes.rolling(10).mean().iloc[-1] / 2000
-        features.extend([sma5, sma10, closes.iloc[-1] / closes.rolling(20).mean().iloc[-1]])
-        current_price = closes.iloc[-1]
-        return np.array(features).reshape(1, -1), current_price
-
-    def train_from_trades(self, trade_journal):
-        """Learn from past trades (features + action labels)."""
-        if len(trade_journal) < 10:
-            return
-        X, y = [], []
-        for trade in trade_journal:
-            entry = trade.get('entry', 0)
-            sl = trade.get('sl', 0)
-            tp = trade.get('tp', 0)
-            if entry == 0:
-                continue
-            risk = abs(entry - sl)
-            reward = abs(tp - entry)
-            features = [entry/2000, sl/2000, tp/2000, risk/10, reward/10]
-            label = trade.get('signal', 'HOLD')
-            if label == 'BUY':
-                y.append(0)
-            elif label == 'SELL':
-                y.append(1)
-            else:
-                y.append(2)
-            X.append(features)
-        if len(set(y)) >= 2 and len(X) >= 10:
-            self.model.fit(X, y)
-            self.trained = True
-
-    def get_signal(self, ohlc_dict):
+    def analyze_text(self, text):
         """
-        Return signal dict like strategy_agent.
-        TP = AI's own calculation minus tp_reduction_points.
+        செய்திகளைப் படித்து இறுதி சிக்னலை உருவாக்குகிறது.
         """
-        closes = pd.Series(ohlc_dict['closes'])
-        current_price = closes.iloc[-1]
+        # செய்தி கிடைக்கவில்லை என்றால், ட்ரேடை நிறுத்தாமல் இருக்க டீஃபால்ட்டாக BUY கொடுக்கிறோம்
+        if not text:
+            return "BUY"
 
-        signal = "HOLD"
+        text = str(text).lower()
+        
+        # வார்த்தைகளை எண்ணுதல்
+        pos_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.positive_keywords)
+        neg_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.negative_keywords)
 
-        if self.trained:
-            features, price = self._make_features(ohlc_dict)
-            if features is not None:
-                pred = self.model.predict(features)[0]  # 0=BUY, 1=SELL, 2=HOLD
-                signal_map = {0: "BUY", 1: "SELL", 2: "HOLD"}
-                signal = signal_map.get(pred, "HOLD")
+        # பாசிட்டிவ் வார்த்தைகள் அதிகமாகவோ அல்லது சமமாகவோ இருந்தால் BUY
+        if pos_score >= neg_score:
+            return "BUY"
+        # நெகட்டிவ் வார்த்தைகள் அதிகமாக இருந்தால் மட்டும் SELL
+        else:
+            return "SELL"
 
-        # Fallback: if still HOLD, use simple EMA cross
-        if signal == "HOLD":
-            ema8 = closes.ewm(span=8).mean().iloc[-1]
-            ema21 = closes.ewm(span=21).mean().iloc[-1]
-            if ema8 > ema21 and current_price > ema21:
-                signal = "BUY"
-            elif ema8 < ema21 and current_price < ema21:
-                signal = "SELL"
-
-        # Calculate SL/TP
-        highs = pd.Series(ohlc_dict['highs'])
-        lows  = pd.Series(ohlc_dict['lows'])
-        atr = (highs.iloc[-14:].max() - lows.iloc[-14:].min()) / 2
-        if atr < 0.5:
-            atr = 1.0
-
-        sl = tp = entry_zone = None
-        if signal == "BUY":
-            # SL below entry by 1.5 * ATR, but not closer than min_stop_distance
-            sl = current_price - max(self.atr_multiplier_sl * atr, self.min_stop_distance)
-            # TP = entry + (2.0 * ATR) - tp_reduction_points
-            tp_raw = current_price + self.atr_multiplier_tp * atr
-            tp = tp_raw - self.tp_reduction_points
-            # Ensure TP is still above entry + min_stop_distance
-            if tp <= current_price + self.min_stop_distance:
-                tp = current_price + self.min_stop_distance + 0.5
-            entry_zone = (current_price, current_price)
-        elif signal == "SELL":
-            sl = current_price + max(self.atr_multiplier_sl * atr, self.min_stop_distance)
-            tp_raw = current_price - self.atr_multiplier_tp * atr
-            tp = tp_raw + self.tp_reduction_points   # for SELL, TP is lower; adding reduction makes it less negative (closer to entry)
-            if tp >= current_price - self.min_stop_distance:
-                tp = current_price - self.min_stop_distance - 0.5
-            entry_zone = (current_price, current_price)
-
-        trend = "UPTREND" if current_price > closes.ewm(span=50).mean().iloc[-1] else "DOWNTREND"
-        return {
-            "signal": signal,
-            "entry_zone": entry_zone,
-            "sl": round(sl, 2) if sl else None,
-            "tp": round(tp, 2) if tp else None,
-            "trend": trend,
-            "current_price": current_price
-        }
+# லோக்கல் டெஸ்டிங்
+if __name__ == "__main__":
+    analyzer = NLPSentimentAgent()
+    sample_news = "Market is going up with high growth and massive profit"
+    print(f"Sample NLP Decision: {analyzer.analyze_text(sample_news)}")
