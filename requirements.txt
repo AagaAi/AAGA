@@ -13,3 +13,4 @@ feedparser
 yfinance
 telegram
 python-telegram-bot
+websockets
