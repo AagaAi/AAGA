@@ -2,116 +2,42 @@
 import feedparser, json, datetime, time as _time
 from typing import Dict, Any
 
-class NLPSentimentAgent:
+
+class NLPSentimentAnalyzer:
     """
-    Advanced sentiment analysis using FinBERT.
-    Falls back to keyword analysis if model fails to load.
+    நிதிச் செய்திகளைப் படித்து சென்டிமென்ட்டைப் பகுப்பாய்வு செய்யும் லேசான ஏஜெண்ட்.
+    இது எப்பொழுதும் "BUY" அல்லது "SELL" என்ற முடிவை மட்டுமே கொடுக்கும்.
     """
-    def __init__(self, model_name: str = "ProsusAI/finbert"):
-        self.model_name = model_name
-        self.available = False
-        self.pipeline = None
-        self.feeds = [
-            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC%3DF&region=US&lang=en-US",
-            "https://www.investing.com/rss/news_25.rss"
-        ]
-        try:
-            from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForSequenceClassification.from_pretrained(model_name)
-            self.pipeline = pipeline("text-classification", model=model, tokenizer=tokenizer)
-            self.available = True
-            print("✅ FinBERT sentiment model loaded")
-        except Exception as e:
-            print(f"⚠️ FinBERT loading failed: {e}. Using keyword fallback.")
+    def __init__(self):
+        # பாசிட்டிவ் (Bullish) வார்த்தைகள்
+        self.positive_keywords = ['growth', 'bullish', 'high', 'profit', 'up', 'soar', 'surge', 'buy', 'positive', 'gain', 'rally']
+        # நெகட்டிவ் (Bearish) வார்த்தைகள்
+        self.negative_keywords = ['crash', 'bearish', 'low', 'loss', 'down', 'drop', 'fall', 'sell', 'negative', 'decline', 'plunge']
 
-    def fetch_headlines(self, limit: int = 5) -> list:
-        headlines = []
-        for url in self.feeds:
-            try:
-                parsed = feedparser.parse(url)
-                for entry in parsed.entries[:limit]:
-                    title = entry.get("title", "").strip()
-                    if title and title not in [h['title'] for h in headlines]:
-                        headlines.append({
-                            "title": title,
-                            "published": entry.get("published", "")
-                        })
-            except:
-                continue
-        return headlines[:10]
+    def analyze_text(self, text):
+        """
+        செய்திகளைப் படித்து இறுதி சிக்னலை உருவாக்குகிறது.
+        """
+        # செய்தி கிடைக்கவில்லை என்றால், ட்ரேடை நிறுத்தாமல் இருக்க டீஃபால்ட்டாக BUY கொடுக்கிறோம்
+        if not text:
+            return "BUY"
 
-    def analyze(self) -> Dict[str, Any]:
-        headlines = self.fetch_headlines()
-        if not headlines:
-            return {
-                "sentiment": "HOLD", "confidence": 0.0, "prob_hold": 0.0,
-                "expected_impact_pips": 0, "summary": "No news", "headlines": []
-            }
+        text = str(text).lower()
+        
+        # வார்த்தைகளை எண்ணுதல்
+        pos_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.positive_keywords)
+        neg_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.negative_keywords)
 
-        if self.available and self.pipeline:
-            analyzed = []
-            bullish = bearish = neutral = 0
-            total_conf = 0
-            for h in headlines:
-                result = self.pipeline(h["title"])[0]
-                label = result["label"]
-                score = result["score"]
-                if label == "positive":
-                    bullish += 1
-                    total_conf += score
-                elif label == "negative":
-                    bearish += 1
-                    total_conf += score
-                else:
-                    neutral += 1
-                analyzed.append({
-                    "title": h["title"],
-                    "sentiment": label,
-                    "confidence": round(score, 2)
-                })
-            n = len(analyzed)
-            if bullish > bearish and bullish > neutral:
-                sentiment = "BUY"
-                prob_hold = 0.1
-                impact = bullish * 50
-            elif bearish > bullish and bearish > neutral:
-                sentiment = "SELL"
-                prob_hold = 0.1
-                impact = -bearish * 50
-            else:
-                sentiment = "HOLD"
-                prob_hold = 0.5
-                impact = 0
-            confidence = round(total_conf / n, 2) if n > 0 else 0.5
-            summary = f"NLP sentiment: {bullish} bullish, {bearish} bearish, {neutral} neutral."
+        # பாசிட்டிவ் வார்த்தைகள் அதிகமாகவோ அல்லது சமமாகவோ இருந்தால் BUY
+        if pos_score >= neg_score:
+            return "BUY"
+        # நெகட்டிவ் வார்த்தைகள் அதிகமாக இருந்தால் மட்டும் SELL
         else:
-            # Fallback to keyword
-            high_keywords = ["fomc","rate","cpi","nfp","gdp","war","recession","trump"]
-            med_keywords  = ["unemployment","retail","gold","dollar","treasury","yield"]
-            high_count = sum(1 for h in headlines for kw in high_keywords if kw in h['title'].lower())
-            med_count  = sum(1 for h in headlines for kw in med_keywords if kw in h['title'].lower())
-            if high_count > 0:
-                prob_hold = 0.9
-                sentiment = "HOLD"
-                impact = 100
-            elif med_count >= 3:
-                prob_hold = 0.4
-                sentiment = "HOLD"
-                impact = 30
-            else:
-                prob_hold = 0.0
-                sentiment = "HOLD"
-                impact = 0
-            confidence = 1.0 if prob_hold > 0 else 0.5
-            summary = f"Keyword analysis: high={high_count}, med={med_count}"
-            analyzed = headlines
+            return "SELL"
 
-        return {
-            "sentiment": sentiment,
-            "confidence": confidence,
-            "prob_hold": prob_hold,
-            "expected_impact_pips": impact,
-            "summary": summary,
-            "headlines": analyzed
-        }
+# லோக்கல் டெஸ்டிங்
+if __name__ == "__main__":
+    analyzer = NLPSentimentAnalyzer()
+    sample_news = "Market is going up with high growth and massive profit"
+    print(f"Sample NLP Decision: {analyzer.analyze_text(sample_news)}")
+
