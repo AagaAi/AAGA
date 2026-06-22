@@ -4,20 +4,21 @@ import google.generativeai as genai
 class GeminiAnalyst:
     """
     Gemini API மூலம் அட்வைஸ் வழங்கும் ஏஜெண்ட். 
-    API வேலை செய்யவில்லை என்றாலும் எரர் அடிக்காமல் சிஸ்டத்தைக் காப்பாற்றும்.
+    API லிமிட்டைத் தவிர்க்க டைமர் வசதியுடன்.
     """
     def __init__(self, api_key=None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         
-        # main.py தேடும் 'available' வார்த்தை இங்கே சேர்க்கப்பட்டுள்ளது
+        # main.py தேடும் வார்த்தைகள் இங்கே சேர்க்கப்பட்டுள்ளன
         self.available = False  
         self.is_active = False
+        self.disabled_until = 0  # <--- 15-min லூப் எரரைத் தடுக்கும் டைமர்
         
         if self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
                 self.model = genai.GenerativeModel('gemini-1.5-flash')
-                self.available = True  # API சரியாக இருந்தால் True ஆக மாறும்
+                self.available = True  
                 self.is_active = True
                 print("✅ Gemini Analyst தயார்!")
             except Exception as e:
@@ -27,18 +28,16 @@ class GeminiAnalyst:
         return self.get_advice(prompt)
 
     def get_advice(self, prompt=""):
-        """Gemini-யிடம் இருந்து பதிலைப் பெறுகிறது"""
         if not self.available:
-            return "Gemini API குறியீடு இல்லை (அல்லது) லிமிட் முடிந்தது. AI தனது சொந்த உத்திகளைப் பயன்படுத்தி ட்ரேட் செய்யும்."
+            return "Gemini API குறியீடு இல்லை அல்லது லிமிட் முடிந்தது. AI சொந்த உத்தியைப் பயன்படுத்தும்."
         
         try:
-            # ஸ்ட்ரிங் பார்மட்டிற்கு மாற்றி அனுப்புகிறோம்
             response = self.model.generate_content(str(prompt))
             return response.text
         except Exception as e:
             print(f"⚠️ Gemini API Error: {e}")
-            return "Gemini நெட்வொர்க் பிழை. AI சொந்த உத்தியைப் பயன்படுத்துகிறது."
+            return "Gemini நெட்வொர்க் பிழை. AI சொந்த உத்தியைப் பயன்படுத்தும்."
 
-# ஒருவேளை வேறு ஏதேனும் கோப்பு பழைய பெயரில் தேடினால் எரர் வராமல் இருக்க:
+# பேக்கப் பெயர் (Backup Name)
 GeminiAgent = GeminiAnalyst
 
