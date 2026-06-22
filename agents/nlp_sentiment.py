@@ -1,9 +1,6 @@
-# agents/nlp_sentiment.py
-import feedparser, json, datetime, time as _time
-from typing import Dict, Any
+import re
 
-
-class NLPSentimentAnalyzer:
+class NLPSentimentAgent:  # <-- பெயர் சரியாக மாற்றப்பட்டுள்ளது
     """
     நிதிச் செய்திகளைப் படித்து சென்டிமென்ட்டைப் பகுப்பாய்வு செய்யும் லேசான ஏஜெண்ட்.
     இது எப்பொழுதும் "BUY" அல்லது "SELL" என்ற முடிவை மட்டுமே கொடுக்கும்.
@@ -37,7 +34,6 @@ class NLPSentimentAnalyzer:
 
 # லோக்கல் டெஸ்டிங்
 if __name__ == "__main__":
-    analyzer = NLPSentimentAnalyzer()
+    analyzer = NLPSentimentAgent()
     sample_news = "Market is going up with high growth and massive profit"
     print(f"Sample NLP Decision: {analyzer.analyze_text(sample_news)}")
-
