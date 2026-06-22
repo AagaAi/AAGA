@@ -1,7 +1,7 @@
 import os
 import google.generativeai as genai
 
-class GeminiAgent:
+class GeminiAnalyst:  # <--- பெயர் GeminiAnalyst என மாற்றப்பட்டுள்ளது
     """
     Gemini API மூலம் அட்வைஸ் வழங்கும் ஏஜெண்ட். 
     API வேலை செய்யவில்லை என்றாலும் எரர் அடிக்காமல் சிஸ்டத்தைக் காப்பாற்றும்.
@@ -16,7 +16,7 @@ class GeminiAgent:
                 # லேட்டஸ்ட் மாடலான gemini-1.5-flash-ஐப் பயன்படுத்துகிறோம்
                 self.model = genai.GenerativeModel('gemini-1.5-flash')
                 self.is_active = True
-                print("✅ Gemini Agent தயார்!")
+                print("✅ Gemini Analyst தயார்!")
             except Exception as e:
                 print(f"⚠️ Gemini Init Error: {e}")
 
@@ -35,4 +35,7 @@ class GeminiAgent:
         except Exception as e:
             print(f"⚠️ Gemini API Error: {e}")
             return "Gemini நெட்வொர்க் பிழை. AI சொந்த உத்தியைப் பயன்படுத்துகிறது."
+
+# ஒருவேளை வேறு ஏதேனும் கோப்பு பழைய பெயரில் தேடினால் எரர் வராமல் இருக்க:
+GeminiAgent = GeminiAnalyst
 
