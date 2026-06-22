@@ -1,39 +1,32 @@
 import re
 
-class NLPSentimentAgent:  # <-- பெயர் சரியாக மாற்றப்பட்டுள்ளது
+class NLPSentimentAgent:
     """
-    நிதிச் செய்திகளைப் படித்து சென்டிமென்ட்டைப் பகுப்பாய்வு செய்யும் லேசான ஏஜெண்ட்.
-    இது எப்பொழுதும் "BUY" அல்லது "SELL" என்ற முடிவை மட்டுமே கொடுக்கும்.
+    செய்திகளைப் படித்து சென்டிமென்ட்டைப் பகுப்பாய்வு செய்யும் லேசான ஏஜெண்ட்.
+    Dashboard மற்றும் main.py எதிர்பார்க்கும் Dictionary பார்மட்டில் இயங்கும்.
     """
     def __init__(self):
-        # பாசிட்டிவ் (Bullish) வார்த்தைகள்
-        self.positive_keywords = ['growth', 'bullish', 'high', 'profit', 'up', 'soar', 'surge', 'buy', 'positive', 'gain', 'rally']
-        # நெகட்டிவ் (Bearish) வார்த்தைகள்
-        self.negative_keywords = ['crash', 'bearish', 'low', 'loss', 'down', 'drop', 'fall', 'sell', 'negative', 'decline', 'plunge']
+        self.positive_keywords = ['growth', 'bullish', 'high', 'profit', 'up', 'soar', 'surge', 'buy', 'positive']
+        self.negative_keywords = ['crash', 'bearish', 'low', 'loss', 'down', 'drop', 'fall', 'sell', 'negative']
 
-    def analyze_text(self, text):
+    def analyze(self, text=""):
         """
-        செய்திகளைப் படித்து இறுதி சிக்னலை உருவாக்குகிறது.
+        Main.py எதிர்பார்க்கும் 'analyze' பங்க்ஷன் (Dictionary-ஐ அனுப்பும்)
         """
-        # செய்தி கிடைக்கவில்லை என்றால், ட்ரேடை நிறுத்தாமல் இருக்க டீஃபால்ட்டாக BUY கொடுக்கிறோம்
+        # செய்தி வரவில்லை என்றால் டீஃபால்ட் சிக்னல்
         if not text:
-            return "BUY"
+            return {"signal": "BUY", "score": 1.0, "prob_hold": 0.0}
 
         text = str(text).lower()
-        
-        # வார்த்தைகளை எண்ணுதல்
         pos_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.positive_keywords)
         neg_score = sum(len(re.findall(r'\b' + word + r'\b', text)) for word in self.negative_keywords)
 
-        # பாசிட்டிவ் வார்த்தைகள் அதிகமாகவோ அல்லது சமமாகவோ இருந்தால் BUY
         if pos_score >= neg_score:
-            return "BUY"
-        # நெகட்டிவ் வார்த்தைகள் அதிகமாக இருந்தால் மட்டும் SELL
+            return {"signal": "BUY", "score": float(pos_score), "prob_hold": 0.0}
         else:
-            return "SELL"
+            return {"signal": "SELL", "score": float(neg_score), "prob_hold": 0.0}
 
-# லோக்கல் டெஸ்டிங்
-if __name__ == "__main__":
-    analyzer = NLPSentimentAgent()
-    sample_news = "Market is going up with high growth and massive profit"
-    print(f"Sample NLP Decision: {analyzer.analyze_text(sample_news)}")
+    def analyze_text(self, text=""):
+        """பழைய ஏஜெண்டுகள் கேட்டால் ஸ்ட்ரிங் பார்மட்டில் அனுப்பும்"""
+        return self.analyze(text)["signal"]
+
