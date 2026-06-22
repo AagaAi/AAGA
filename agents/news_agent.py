@@ -1,37 +1,42 @@
-# agents/news_agent.py
+import urllib.request
+import xml.etree.ElementTree as ET
 from agents.nlp_sentiment import NLPSentimentAgent
 
-class NewsSentimentAgent:
+class NewsAgent:
     """
-    News sentiment agent that uses the advanced NLP engine (FinBERT)
-    with automatic fallback to keyword analysis if the model fails.
-    Provides the same interface (analyze() returning prob_hold etc.)
-    as the old keyword-based agent.
+    இணையத்திலிருந்து செய்திகளை எடுத்து NLP-க்கு அனுப்பும் ஏஜெண்ட்
     """
     def __init__(self):
         self.nlp_agent = NLPSentimentAgent()
+        self.rss_url = "https://finance.yahoo.com/news/rssindex"
+        
+    def fetch_latest_news(self):
+        try:
+            req = urllib.request.Request(self.rss_url, headers={'User-Agent': 'Mozilla/5.0'})
+            response = urllib.request.urlopen(req, timeout=5)
+            xml_data = response.read()
+            root = ET.fromstring(xml_data)
+            
+            news_items = []
+            for item in root.findall('.//item')[:10]:
+                title = item.find('title')
+                if title is not None:
+                    news_items.append(title.text)
+            return " ".join(news_items).lower()
+        except Exception as e:
+            print(f"⚠️ செய்தி எடுப்பதில் பிழை: {e}")
+            return ""
 
     def analyze(self):
         """
-        Returns dict with:
-            - prob_hold: float 0-1 (for Master Agent override)
-            - sentiment: BUY/SELL/HOLD
-            - confidence: 0-1
-            - expected_impact_pips: float
-            - summary: string
-            - headlines: list of analyzed headlines
+        Main.py இந்த analyze() ஃபங்ஷனைத்தான் அழைக்கிறது.
+        இது Dictionary டேட்டாவை ரிட்டர்ன் செய்யும்.
         """
-        result = self.nlp_agent.analyze()
-        # Ensure backward‑compatible keys
-        return {
-            "prob_hold": result.get("prob_hold", 0.0),
-            "sentiment": result.get("sentiment", "HOLD"),
-            "confidence": result.get("confidence", 0.5),
-            "expected_impact_pips": result.get("expected_impact_pips", 0),
-            "summary": result.get("summary", ""),
-            "headlines": result.get("headlines", [])
-        }
+        news_text = self.fetch_latest_news()
+        # NLP ஏஜெண்ட் மூலம் அகராதி (dict) வடிவத்தில் சிக்னலை அனுப்புகிறோம்
+        return self.nlp_agent.analyze(news_text)
 
-    def fetch_headlines(self):
-        """Return raw headlines for dashboard or other uses."""
-        return self.nlp_agent.fetch_headlines()
+# (உங்கள் பிராஜெக்ட்டில் NewsSentimentAgent என்று பெயர் இருந்தால், 
+# அதற்காக ஒரு டம்மி கிளாஸ்)
+class NewsSentimentAgent(NewsAgent):
+    pass
