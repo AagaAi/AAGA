@@ -14,3 +14,4 @@ yfinance
 telegram
 python-telegram-bot
 websockets
+stable-baselines3>=2.0.0
